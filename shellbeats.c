@@ -211,6 +211,8 @@ typedef struct {
     bool shuffle_mode;
     RepeatMode repeat_mode;
     int *shuffle_order;       // Shuffled index array (NULL when inactive)
+    int shuffle_count;        // Number of entries in shuffle_order
+    int shuffle_pos;          // Position of the playing song in shuffle_order (-1=none)
     int shuffle_playlist_idx; // Playlist_idx the order belongs to (-1=search, -2=none)
 
     // Seek step in seconds (configurable)
@@ -1271,6 +1273,8 @@ static void load_config(AppState *st) {
     st->shuffle_mode = false;
     st->repeat_mode = REPEAT_OFF;
     st->shuffle_order = NULL;
+    st->shuffle_count = 0;
+    st->shuffle_pos = -1;
     st->shuffle_playlist_idx = -2;
     st->last_query[0] = '\0';
     st->cached_search_count = 0;
@@ -2811,51 +2815,101 @@ static void play_playlist_song(AppState *st, int playlist_idx, int song_idx) {
 static void free_shuffle_order(AppState *st) {
     free(st->shuffle_order);
     st->shuffle_order = NULL;
+    st->shuffle_count = 0;
+    st->shuffle_pos = -1;
     st->shuffle_playlist_idx = -2;
 }
 
-static void build_shuffle_order(AppState *st, int count, int idx) {
-    free(st->shuffle_order);
+static void swap_ints(int *a, int *b) {
+    int tmp = *a;
+    *a = *b;
+    *b = tmp;
+}
+
+// Build a new shuffled order for a list of count songs.
+// If first is a valid index it is placed at position 0 and becomes the current
+// position; if avoid is a valid index it will not be placed at position 0.
+static void build_shuffle_order(AppState *st, int count, int idx, int first, int avoid) {
+    free_shuffle_order(st);
+    if (count <= 0) return;
     st->shuffle_order = malloc(count * sizeof(int));
-    if (!st->shuffle_order) {
-        st->shuffle_playlist_idx = -2;
-        return;
-    }
+    if (!st->shuffle_order) return;
+    st->shuffle_count = count;
     st->shuffle_playlist_idx = idx;
     for (int i = 0; i < count; i++) st->shuffle_order[i] = i;
     for (int i = count - 1; i > 0; i--) {
         int j = rand() % (i + 1);
-        int tmp = st->shuffle_order[i];
-        st->shuffle_order[i] = st->shuffle_order[j];
-        st->shuffle_order[j] = tmp;
+        swap_ints(&st->shuffle_order[i], &st->shuffle_order[j]);
     }
-}
-
-static int shuffle_current_pos(AppState *st, int count) {
-    int cur_pos = -1;
-    if (st->shuffle_order) {
+    if (first >= 0 && first < count) {
         for (int i = 0; i < count; i++) {
-            if (st->shuffle_order[i] == st->playing_index)
-            {
-                cur_pos = i;
+            if (st->shuffle_order[i] == first) {
+                swap_ints(&st->shuffle_order[0], &st->shuffle_order[i]);
                 break;
             }
         }
+        st->shuffle_pos = 0;
+    } else if (avoid >= 0 && avoid < count && count > 1 && st->shuffle_order[0] == avoid) {
+        swap_ints(&st->shuffle_order[0], &st->shuffle_order[1 + rand() % (count - 1)]);
     }
-    return cur_pos;
 }
 
-static int shuffle_next_pos(AppState *st, int count, int idx) {
-    if (!st->shuffle_order || st->shuffle_playlist_idx != idx) {
-        build_shuffle_order(st, count, idx);
+static bool shuffle_order_valid(AppState *st, int count, int idx) {
+    return st->shuffle_order && st->shuffle_playlist_idx == idx && st->shuffle_count == count;
+}
+
+// Keep shuffle_pos pointing at the playing song. If the user picked a song
+// manually that has not been played yet this cycle, move it into the next slot
+// so the songs still ahead in the order are not skipped.
+static void shuffle_sync_pos(AppState *st) {
+    int cur = st->playing_index;
+    if (cur < 0 || cur >= st->shuffle_count) return;
+    if (st->shuffle_pos >= 0 && st->shuffle_order[st->shuffle_pos] == cur) return;
+    for (int i = st->shuffle_pos + 1; i < st->shuffle_count; i++) {
+        if (st->shuffle_order[i] == cur) {
+            st->shuffle_pos++;
+            swap_ints(&st->shuffle_order[st->shuffle_pos], &st->shuffle_order[i]);
+            return;
+        }
     }
-    int cur_pos = shuffle_current_pos(st, count);
-    int next_pos = cur_pos + 1;
-    if (next_pos >= count) {
-        build_shuffle_order(st, count, idx);
-        next_pos = 0;
+}
+
+// Advance to the next song in shuffle_order and return its index, or -1 if
+// there is nothing to play (empty list, or end of cycle when repeat is off).
+static int shuffle_next(AppState *st, int count, int idx, bool wrap) {
+    if (!shuffle_order_valid(st, count, idx)) {
+        build_shuffle_order(st, count, idx, st->playing_index, -1);
+        if (!st->shuffle_order) return -1;
+    } else {
+        shuffle_sync_pos(st);
     }
-    return next_pos;
+    if (st->shuffle_pos + 1 >= count) {
+        if (!wrap) return -1;
+        build_shuffle_order(st, count, idx, -1, st->playing_index);
+        if (!st->shuffle_order) return -1;
+    }
+    st->shuffle_pos++;
+    return st->shuffle_order[st->shuffle_pos];
+}
+
+// Step back to the previous song in shuffle_order and return its index, or -1
+// if at the start of the order.
+static int shuffle_prev(AppState *st, int count, int idx) {
+    if (!shuffle_order_valid(st, count, idx)) {
+        build_shuffle_order(st, count, idx, st->playing_index, -1);
+        return -1;
+    }
+    shuffle_sync_pos(st);
+    if (st->shuffle_pos <= 0) return -1;
+    st->shuffle_pos--;
+    return st->shuffle_order[st->shuffle_pos];
+}
+
+static void stop_playback_state(AppState *st) {
+    st->playing_index = -1;
+    st->playing_from_playlist = false;
+    st->playing_playlist_idx = -1;
+    st->paused = false;
 }
 
 static void play_next(AppState *st) {
@@ -2879,12 +2933,18 @@ static void play_next(AppState *st) {
         return;
     }
 
+    bool wrap = (effective_repeat == REPEAT_ALL);
+
     if (st->playing_from_playlist && st->playing_playlist_idx >= 0) {
         Playlist *pl = &st->playlists[st->playing_playlist_idx];
         if (st->shuffle_mode) {
-            int next_pos = shuffle_next_pos(st, pl->count, st->playing_playlist_idx);
-            int next = st->shuffle_order[next_pos];
-            sb_log("[PLAYBACK] play_next: shuffle pos=%d/%d song=%d", next_pos, pl->count, next);
+            int next = shuffle_next(st, pl->count, st->playing_playlist_idx, wrap);
+            if (next < 0) {
+                sb_log("[PLAYBACK] play_next: shuffle finished (count=%d)", pl->count);
+                stop_playback_state(st);
+                return;
+            }
+            sb_log("[PLAYBACK] play_next: shuffle pos=%d/%d song=%d", st->shuffle_pos, pl->count, next);
             play_playlist_song(st, st->playing_playlist_idx, next);
             if (st->playing_playlist_idx == st->current_playlist_idx)
                 st->playlist_song_selected = next;
@@ -2895,24 +2955,25 @@ static void play_next(AppState *st) {
                 play_playlist_song(st, st->playing_playlist_idx, next);
                 if (st->playing_playlist_idx == st->current_playlist_idx)
                     st->playlist_song_selected = next;
-            } else if (effective_repeat == REPEAT_ALL && pl->count > 0) {
+            } else if (wrap && pl->count > 0) {
                 sb_log("[PLAYBACK] play_next: repeat-all mode, wrapping playlist to start");
                 play_playlist_song(st, st->playing_playlist_idx, 0);
                 if (st->playing_playlist_idx == st->current_playlist_idx)
                     st->playlist_song_selected = 0;
             } else {
                 sb_log("[PLAYBACK] play_next: already at last song in playlist (%d/%d)", st->playing_index, pl->count);
-                st->playing_index = -1;
-                st->playing_from_playlist = false;
-                st->playing_playlist_idx = -1;
-                st->paused = false;
+                stop_playback_state(st);
             }
         }
     } else if (st->search_count > 0) {
         if (st->shuffle_mode) {
-            int next_pos = shuffle_next_pos(st, st->search_count, -1);
-            int next = st->shuffle_order[next_pos];
-            sb_log("[PLAYBACK] play_next: shuffle search pos=%d/%d song=%d", next_pos, st->search_count, next);
+            int next = shuffle_next(st, st->search_count, -1, wrap);
+            if (next < 0) {
+                sb_log("[PLAYBACK] play_next: shuffle finished (count=%d)", st->search_count);
+                stop_playback_state(st);
+                return;
+            }
+            sb_log("[PLAYBACK] play_next: shuffle search pos=%d/%d song=%d", st->shuffle_pos, st->search_count, next);
             play_search_result(st, next);
             st->search_selected = next;
         } else {
@@ -2923,68 +2984,44 @@ static void play_next(AppState *st) {
                 st->search_selected = next;
             } else {
                 sb_log("[PLAYBACK] play_next: already at last search result (%d/%d)", st->playing_index, st->search_count);
-                st->playing_index = -1;
-                st->playing_from_playlist = false;
-                st->playing_playlist_idx = -1;
-                st->paused = false;
+                stop_playback_state(st);
             }
         }
     }
 }
 
-static void play_prev(AppState *st) {
+// Returns true if a previous track was started.
+static bool play_prev(AppState *st) {
     sb_log("[PLAYBACK] play_prev: current index=%d, from_playlist=%d, playlist_idx=%d",
            st->playing_index, st->playing_from_playlist, st->playing_playlist_idx);
     if (st->playing_from_playlist && st->playing_playlist_idx >= 0) {
-        if (st->shuffle_mode) {
-            Playlist *pl = &st->playlists[st->playing_playlist_idx];
-            if (st->shuffle_order && st->shuffle_playlist_idx == st->playing_playlist_idx) {
-                int cur_pos = shuffle_current_pos(st, pl->count);
-                if (cur_pos > 0) {
-                    int prev = st->shuffle_order[cur_pos - 1];
-                    sb_log("[PLAYBACK] play_prev: shuffle pos=%d/%d song=%d", cur_pos - 1, pl->count, prev);
-                    play_playlist_song(st, st->playing_playlist_idx, prev);
-                    if (st->playing_playlist_idx == st->current_playlist_idx)
-                        st->playlist_song_selected = prev;
-                } else {
-                    sb_log("[PLAYBACK] play_prev: shuffle mode, at start of order");
-                }
-            }
-        } else {
-            int prev = st->playing_index - 1;
-            if (prev >= 0) {
-                sb_log("[PLAYBACK] play_prev: going back to playlist song #%d", prev);
-                play_playlist_song(st, st->playing_playlist_idx, prev);
-                if (st->playing_playlist_idx == st->current_playlist_idx)
-                    st->playlist_song_selected = prev;
-            } else {
-                sb_log("[PLAYBACK] play_prev: already at first song in playlist");
-            }
+        Playlist *pl = &st->playlists[st->playing_playlist_idx];
+        int prev = st->shuffle_mode
+            ? shuffle_prev(st, pl->count, st->playing_playlist_idx)
+            : st->playing_index - 1;
+        if (prev < 0) {
+            sb_log("[PLAYBACK] play_prev: already at first song in playlist");
+            return false;
         }
+        sb_log("[PLAYBACK] play_prev: going back to playlist song #%d", prev);
+        play_playlist_song(st, st->playing_playlist_idx, prev);
+        if (st->playing_playlist_idx == st->current_playlist_idx)
+            st->playlist_song_selected = prev;
+        return true;
     } else if (st->search_count > 0) {
-        if (st->shuffle_mode) {
-            if (st->shuffle_order && st->shuffle_playlist_idx == -1) {
-                int cur_pos = shuffle_current_pos(st, st->search_count);
-                if (cur_pos > 0) {
-                    int prev = st->shuffle_order[cur_pos - 1];
-                    sb_log("[PLAYBACK] play_prev: shuffle search pos=%d/%d song=%d", cur_pos - 1, st->search_count, prev);
-                    play_search_result(st, prev);
-                    st->search_selected = prev;
-                } else {
-                    sb_log("[PLAYBACK] play_prev: shuffle mode, at start of order");
-                }
-            }
-        } else {
-            int prev = st->playing_index - 1;
-            if (prev >= 0) {
-                sb_log("[PLAYBACK] play_prev: going back to search result #%d", prev);
-                play_search_result(st, prev);
-                st->search_selected = prev;
-            } else {
-                sb_log("[PLAYBACK] play_prev: already at first search result");
-            }
+        int prev = st->shuffle_mode
+            ? shuffle_prev(st, st->search_count, -1)
+            : st->playing_index - 1;
+        if (prev < 0) {
+            sb_log("[PLAYBACK] play_prev: already at first search result");
+            return false;
+        }
+        sb_log("[PLAYBACK] play_prev: going back to search result #%d", prev);
+        play_search_result(st, prev);
+        st->search_selected = prev;
+        return true;
     }
-}
+    return false;
 }
 
 // ============================================================================
@@ -3916,7 +3953,8 @@ static void show_help(void) {
 
     mvprintw(y++, 4, "NAVIGATION:");
     mvprintw(y++, 6, "Up/Down/j/k Navigate list");
-    mvprintw(y++, 6, "PgUp/PgDn   Page up/down (also Ctrl+U/Ctrl+D)");
+    mvprintw(y++, 6, "PgUp/PgDn   Page up/down");
+    mvprintw(y++, 6, "Ctrl+U/D    Half page up/down");
     mvprintw(y++, 6, "g/G         Go to start/end");
     mvprintw(y++, 6, "Esc         Go back");
     y++;
@@ -4084,6 +4122,13 @@ static void augment_path_for_js_runtimes(void) {
 
     setenv("PATH", new_path, 1);
     free(new_path);
+}
+
+// Move a list selection by delta, clamped to [0, count - 1]
+static void move_selection(int *sel, int count, int delta) {
+    *sel += delta;
+    if (*sel >= count) *sel = count - 1;
+    if (*sel < 0) *sel = 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -4282,8 +4327,10 @@ int main(int argc, char *argv[]) {
         int rows, cols;
         getmaxyx(stdscr, rows, cols);
         (void)cols;
-        int list_height = rows - 7;
+        int list_height = rows - 9;
         if (list_height < 1) list_height = 1;
+        int half_page = list_height / 2;
+        if (half_page < 1) half_page = 1;
 
         // NEW: Handle settings editing mode separately
         if (st.view == VIEW_SETTINGS && st.settings_editing) {
@@ -4408,8 +4455,10 @@ int main(int argc, char *argv[]) {
 
             case 'p':
                 if (st.playing_index >= 0) {
-                    play_prev(&st);
-                    snprintf(status, sizeof(status), "Previous track");
+                    if (play_prev(&st))
+                        snprintf(status, sizeof(status), "Previous track");
+                    else
+                        snprintf(status, sizeof(status), "Already at first track");
                 }
                 break;
 
@@ -4517,17 +4566,19 @@ int main(int argc, char *argv[]) {
                         break;
 
                     case KEY_PPAGE:
-                    case KEY_CTRL('u'):
-                        st.search_selected -= list_height;
-                        if (st.search_selected < 0) st.search_selected = 0;
+                        move_selection(&st.search_selected, st.search_count, -list_height);
                         break;
 
                     case KEY_NPAGE:
+                        move_selection(&st.search_selected, st.search_count, list_height);
+                        break;
+
+                    case KEY_CTRL('u'):
+                        move_selection(&st.search_selected, st.search_count, -half_page);
+                        break;
+
                     case KEY_CTRL('d'):
-                        st.search_selected += list_height;
-                        if (st.search_selected >= st.search_count)
-                            st.search_selected = st.search_count - 1;
-                        if (st.search_selected < 0) st.search_selected = 0;
+                        move_selection(&st.search_selected, st.search_count, half_page);
                         break;
 
                     case KEY_HOME:
@@ -4674,17 +4725,19 @@ int main(int argc, char *argv[]) {
                         break;
 
                     case KEY_PPAGE:
-                    case KEY_CTRL('u'):
-                        st.playlist_selected -= list_height;
-                        if (st.playlist_selected < 0) st.playlist_selected = 0;
+                        move_selection(&st.playlist_selected, st.playlist_count, -list_height);
                         break;
 
                     case KEY_NPAGE:
+                        move_selection(&st.playlist_selected, st.playlist_count, list_height);
+                        break;
+
+                    case KEY_CTRL('u'):
+                        move_selection(&st.playlist_selected, st.playlist_count, -half_page);
+                        break;
+
                     case KEY_CTRL('d'):
-                        st.playlist_selected += list_height;
-                        if (st.playlist_selected >= st.playlist_count)
-                            st.playlist_selected = st.playlist_count - 1;
-                        if (st.playlist_selected < 0) st.playlist_selected = 0;
+                        move_selection(&st.playlist_selected, st.playlist_count, half_page);
                         break;
 
                     case '\n':
@@ -4971,19 +5024,19 @@ int main(int argc, char *argv[]) {
                         break;
 
                     case KEY_PPAGE:
-                    case KEY_CTRL('u'):
-                        st.playlist_song_selected -= list_height;
-                        if (st.playlist_song_selected < 0) st.playlist_song_selected = 0;
+                        move_selection(&st.playlist_song_selected, pl ? pl->count : 0, -list_height);
                         break;
 
                     case KEY_NPAGE:
+                        move_selection(&st.playlist_song_selected, pl ? pl->count : 0, list_height);
+                        break;
+
+                    case KEY_CTRL('u'):
+                        move_selection(&st.playlist_song_selected, pl ? pl->count : 0, -half_page);
+                        break;
+
                     case KEY_CTRL('d'):
-                        if (pl) {
-                            st.playlist_song_selected += list_height;
-                            if (st.playlist_song_selected >= pl->count)
-                                st.playlist_song_selected = pl->count - 1;
-                            if (st.playlist_song_selected < 0) st.playlist_song_selected = 0;
-                        }
+                        move_selection(&st.playlist_song_selected, pl ? pl->count : 0, half_page);
                         break;
 
                     case '\n':
@@ -5205,6 +5258,22 @@ int main(int argc, char *argv[]) {
                     case 'j':
                         if (st.add_to_playlist_selected + 1 < st.playlist_count)
                             st.add_to_playlist_selected++;
+                        break;
+
+                    case KEY_PPAGE:
+                        move_selection(&st.add_to_playlist_selected, st.playlist_count, -list_height);
+                        break;
+
+                    case KEY_NPAGE:
+                        move_selection(&st.add_to_playlist_selected, st.playlist_count, list_height);
+                        break;
+
+                    case KEY_CTRL('u'):
+                        move_selection(&st.add_to_playlist_selected, st.playlist_count, -half_page);
+                        break;
+
+                    case KEY_CTRL('d'):
+                        move_selection(&st.add_to_playlist_selected, st.playlist_count, half_page);
                         break;
 
                     case '\n':

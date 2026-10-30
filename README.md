@@ -19,7 +19,7 @@ You can download it here
 - Fixed **large YouTube playlist fetch** (#50). Playlists with more than ~100 items used to truncate silently because YouTube/yt-dlp caps a single `--flat-playlist` response at the page boundary. `fetch_youtube_playlist()` now requests the list in explicit `--playlist-items START-END` chunks of 100 and stops only when yt-dlp returns an empty chunk or `MAX_PLAYLIST_ITEMS` is reached. Progress callback fires after every chunk.
 
 **v0.7.4**
-- Added **song rename** (`r` key): rename individual songs inside a playlist. Press `r` on any song to edit its title in-place. Changes are saved to disk and synced to Surikata automatically.
+- Added **song rename** (`r` key): rename individual songs inside a playlist. Press `r` on any song to edit its title in-place. Changes are saved to disk.
 - Added **rename on add**: when adding a song to a playlist, you are now prompted to rename it before saving. Press Enter to keep the original title, edit it, or press Escape to cancel.
 - Raised **maximum playlist size** from 500 to 1000 songs.
 
@@ -268,21 +268,21 @@ Install dependencies:
 
 ### Debian/Ubuntu
 ```bash
-sudo apt install mpv libncurses-dev libcurl4-openssl-dev libcjson-dev yt-dlp ffmpeg curl
+sudo apt install mpv libncurses-dev yt-dlp ffmpeg curl
 curl -fsSL https://deno.land/install.sh | sh
 ```
 ### Arch
 ```bash
-sudo pacman -S mpv ncurses curl cjson yt-dlp ffmpeg deno
+sudo pacman -S mpv ncurses curl yt-dlp ffmpeg deno
 ```
 ### Fedora/RHEL/CentOS
 ```bash
-sudo dnf install mpv ncurses-devel libcurl-devel cJSON-devel yt-dlp ffmpeg curl
+sudo dnf install mpv ncurses-devel yt-dlp ffmpeg curl
 curl -fsSL https://deno.land/install.sh | sh
 ```
 ### macOS (via [Homebrew](https://brew.sh/))
 ```bash
-brew install mpv yt-dlp cjson ffmpeg curl deno
+brew install mpv yt-dlp ffmpeg curl deno
 ```
 > Note: macOS setup has not been personally tested by the author, but the community confirms there are no compilation issues. ncurses is included with Xcode Command Line Tools.
 
@@ -325,7 +325,8 @@ All shortcuts are visible in the header when you run shellbeats. Here's the comp
 | Key | Action |
 |-----|--------|
 | `↑/↓` or `j/k` | Move selection |
-| `PgUp/PgDn` or `Ctrl+U/Ctrl+D` | Page up/down |
+| `PgUp/PgDn` | Page up/down |
+| `Ctrl+U/Ctrl+D` | Half page up/down |
 | `g/G` | Jump to start/end |
 | `Esc` | Go back |
 
