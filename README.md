@@ -3,12 +3,7 @@ https://shellbeats.com
 
 [![Make a donation](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/donate/?hosted_button_id=RFY5QFC6XDX5N)
 
-<a href="https://apps.apple.com/it/app/surikata/id6760357143"><img src="https://surikata.app/assets/stores/app-store.png" height="40"></a> **Surikata for playlist sync available in appstore!**
 ## Updates
-**After syncing your Shellbeats library on Surikata.app, you can play all your music from the web player on your surikata.app account**
-
-![WebPlayerSuriSync](shellbeatswebplayer.gif)
-
 
 **ShellbeatsNG is now available: a graphical version that does not require using the terminal or compiling the software, for both Windows and Mac users.**
 
@@ -227,36 +222,6 @@ You can import entire YouTube playlists into shellbeats, either for streaming or
 
 > YouTube Playlist integration contributed by ***kathiravanbtm***
 
-## SuriSync — Sync & Share Playlists
-
-![SuriSync](surikata_preview.gif)
-
-**Sync your playlists across multiple computers** and share them with the community through [surikata.app](https://surikata.app).
-
-### How it works
-
-1. Create a free account on [surikata.app](https://surikata.app) and generate a sync token
-2. In shellbeats, press `s` from the playlist view to open the SuriSync menu
-3. Paste your token to link your account
-4. **Push** your local playlists to the cloud
-5. **Pull** your playlists on any other computer running shellbeats
-
-### What you can do
-
-- **Sync between computers**: keep the same playlists on your desktop, laptop, and any other machine push from one, pull from another
-- **Share playlists with the community**: your playlists can be discovered by other Surikata users
-- **Import playlists from others**: browse and import (add-only) playlists shared by the community directly into shellbeats
-- **Follow playlists**: follow other users' playlists and receive updates when they add new songs
-
-Sync is additive-only importing or pulling never removes your existing songs.
-
-### SuriSync controls
-
-| Key | Context | Action |
-|-----|---------|--------|
-| `s` | Playlist view | Open SuriSync menu |
-| `Enter` | SuriSync menu | Execute selected action (push/pull/link/unlink) |
-
 ## Dependencies
 
 - `mpv` - audio playback
@@ -380,12 +345,6 @@ All shortcuts are visible in the header when you run shellbeats. Here's the comp
 | `D` | Download all songs (YouTube playlists) |
 | `u` | Sync YouTube playlist |
 
-### SuriSync
-
-| Key | Action |
-|-----|--------|
-| `s` | Open SuriSync menu (from playlist view) |
-
 ### Other
 
 | Key | Action |
@@ -414,7 +373,6 @@ All shortcuts are visible in the header when you run shellbeats. Here's the comp
 - **Repeat Mode**: `ALL` loops queue/playlist, `ONE` repeats current track, shows `[REPEAT:*]`
 - **Seek Controls**: Jump forward/backward by configurable seconds, or to specific time
 - **Session Memory**: Optionally restore your last search or playlist on startup
-- **SuriSync**: Cloud sync playlists to your Surikata account
 - **XDG Support**: Respects `$XDG_CONFIG_HOME` for config directory location
 - **Visual Feedback**: `[D]` marker shows downloaded songs, `[YT]` marks YouTube playlists, spinner shows active downloads
 - **Organized Storage**: Each playlist gets its own folder

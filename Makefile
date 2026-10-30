@@ -8,14 +8,14 @@ ifeq ($(UNAME_S),Darwin)
     # Detect Homebrew prefix (Apple Silicon /opt/homebrew, Intel /usr/local).
     BREW_PREFIX := $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
     CFLAGS  += -I$(BREW_PREFIX)/include -I$(BREW_PREFIX)/opt/ncurses/include
-    LDFLAGS  = -L$(BREW_PREFIX)/lib -L$(BREW_PREFIX)/opt/ncurses/lib -lncurses -lcurl -lcjson -pthread
+    LDFLAGS  = -L$(BREW_PREFIX)/lib -L$(BREW_PREFIX)/opt/ncurses/lib -lncurses -pthread
 else
     # Linux: needs the wide-char variant explicitly
-    LDFLAGS  = -lncursesw -lcurl -lcjson -pthread
+    LDFLAGS  = -lncursesw -pthread
 endif
 
 TARGET = shellbeats
-SRC = shellbeats.c youtube_playlist.c surikata_sync.c sb_exec.c
+SRC = shellbeats.c youtube_playlist.c sb_exec.c
 
 .PHONY: all clean install uninstall
 

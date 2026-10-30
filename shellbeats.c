@@ -26,7 +26,6 @@
 #include <dirent.h>
 #include <limits.h>
 #include "youtube_playlist.h"
-#include "surikata_sync.h"
 #include "sb_exec.h"
 
 #define MAX_RESULTS 150
@@ -59,7 +58,6 @@ typedef struct {
     int count;
     bool is_youtube_playlist;
     char* youtube_playlist_url;  // only set if is_youtube_playlist is true
-    bool is_shared;             // Synced to Surikata as public
 } Playlist;
 
 // NEW: Configuration structure
@@ -118,8 +116,7 @@ typedef enum {
     VIEW_PLAYLIST_SONGS,
     VIEW_ADD_TO_PLAYLIST,
     VIEW_SETTINGS,
-    VIEW_ABOUT,
-    VIEW_SURISYNC
+    VIEW_ABOUT
 } ViewMode;
 
 typedef enum {
@@ -210,12 +207,6 @@ typedef struct {
     int spinner_frame;
     time_t last_spinner_update;
 
-    // SuriSync overlay state
-    int surisync_selected;
-    ViewMode surisync_return_view;  // View to return to on Esc
-    bool surikata_online;           // Token verified at startup
-    char latest_version[32];        // Latest version from server
-
     // Shuffle mode
     bool shuffle_mode;
     RepeatMode repeat_mode;
@@ -274,7 +265,6 @@ static void load_playlist_songs(AppState *st, int idx);
 static void save_config(AppState *st);  // NEW
 static void load_config(AppState *st);  // NEW
 static void augment_path_for_js_runtimes(void);  // re-augments PATH after deno install
-static void auto_sync_playlist(AppState *st, int idx);
 static int create_playlist(AppState *st, const char *name, bool is_youtube);
 static void free_playlist_items(Playlist *pl);
 static void free_all_playlists(AppState *st);
@@ -1905,9 +1895,8 @@ static void save_playlist(AppState *st, int idx) {
 
     char *escaped_src = json_escape_string(pl->youtube_playlist_url);
 
-    fprintf(f, "{\n  \"name\": \"%s\",\n  \"type\": \"%s\",\n  \"is_shared\": %s,\n  \"playlist_url\": \"%s\",\n  \"songs\": [\n",
+    fprintf(f, "{\n  \"name\": \"%s\",\n  \"type\": \"%s\",\n  \"playlist_url\": \"%s\",\n  \"songs\": [\n",
             pl->name, pl->is_youtube_playlist ? "youtube" : "local",
-            pl->is_shared ? "true" : "false",
             escaped_src ? escaped_src : "");
 
     free(escaped_src);
@@ -1973,24 +1962,6 @@ static void load_playlist_songs(AppState *st, int idx) {
     } else {
         free(src);
         pl->youtube_playlist_url = NULL;
-    }
-
-    // Parse is_shared flag
-    char *shared_str = json_get_string(content, "is_shared");
-    if (shared_str) {
-        pl->is_shared = (strcmp(shared_str, "true") == 0);
-        free(shared_str);
-    } else {
-        // Try boolean (json_get_string won't work for bool, check raw)
-        const char *shared_pos = strstr(content, "\"is_shared\"");
-        if (shared_pos) {
-            shared_pos = strchr(shared_pos, ':');
-            if (shared_pos) {
-                shared_pos++;
-                while (*shared_pos == ' ') shared_pos++;
-                pl->is_shared = (strncmp(shared_pos, "true", 4) == 0);
-            }
-        }
     }
 
     // Parse songs array - simple approach
@@ -2169,7 +2140,7 @@ static int create_playlist(AppState *st, const char *name, bool is_youtube) {
 static bool delete_playlist(AppState *st, int idx) {
     if (idx < 0 || idx >= st->playlist_count) return false;
 
-    // Save playlist name before freeing (needed for directory deletion + sync)
+    // Save playlist name before freeing (needed for directory deletion)
     char playlist_name[256];
     strncpy(playlist_name, st->playlists[idx].name, sizeof(playlist_name) - 1);
     playlist_name[sizeof(playlist_name) - 1] = '\0';
@@ -2201,26 +2172,6 @@ static bool delete_playlist(AppState *st, int idx) {
     memset(&st->playlists[st->playlist_count], 0, sizeof(Playlist));
 
     save_playlists_index(st);
-
-    // Auto-delete from Surikata server (double-fork to avoid zombie)
-    {
-        sb_sync_config_t cfg = sb_load_config(st->config_dir);
-        if (cfg.enabled && strlen(cfg.token) > 0) {
-            pid_t pid = fork();
-            if (pid == 0) {
-                pid_t pid2 = fork();
-                if (pid2 == 0) {
-                    sb_sync_init();
-                    sb_delete_playlist(&cfg, playlist_name);
-                    sb_sync_cleanup();
-                    _exit(0);
-                }
-                _exit(0);
-            } else if (pid > 0) {
-                waitpid(pid, NULL, 0);
-            }
-        }
-    }
 
     return true;
 }
@@ -2261,9 +2212,6 @@ static bool add_song_to_playlist(AppState *st, int playlist_idx, Song *song) {
     // Automatically queue song for download
     add_to_download_queue(st, song->video_id, song->title, pl->name);
 
-    // Auto-sync to Surikata
-    auto_sync_playlist(st, playlist_idx);
-
     return true;
 }
 
@@ -2288,9 +2236,6 @@ static bool remove_song_from_playlist(AppState *st, int playlist_idx, int song_i
     memset(&pl->items[pl->count], 0, sizeof(Song));
 
     save_playlist(st, playlist_idx);
-
-    // Auto-sync to Surikata
-    auto_sync_playlist(st, playlist_idx);
 
     return true;
 }
@@ -3061,41 +3006,11 @@ static void format_duration(int sec, char out[16]) {
     }
 }
 
-// NEW: Updated draw_header to include VIEW_SETTINGS
-// Compare version strings like "0.6" vs "0.7" (locale-independent)
-// Returns: -1 if a < b, 0 if equal, 1 if a > b
-static int version_compare(const char *a, const char *b) {
-    int a_major = 0, a_minor = 0, a_patch = 0;
-    int b_major = 0, b_minor = 0, b_patch = 0;
-    /* sscanf with %d.%d.%d still works for two-component versions:
-     * "0.7" → major=0, minor=7, patch=0 (third %d untouched). */
-    sscanf(a, "%d.%d.%d", &a_major, &a_minor, &a_patch);
-    sscanf(b, "%d.%d.%d", &b_major, &b_minor, &b_patch);
-    if (a_major != b_major) return a_major < b_major ? -1 : 1;
-    if (a_minor != b_minor) return a_minor < b_minor ? -1 : 1;
-    if (a_patch != b_patch) return a_patch < b_patch ? -1 : 1;
-    return 0;
-}
-
-static void draw_header(AppState *st, int cols, ViewMode view) {
+static void draw_header(int cols, ViewMode view) {
     // Line 1: Title
     attron(A_BOLD);
     mvprintw(0, 0, " ShellBeats v%s ", SHELLBEATS_VERSION);
     attroff(A_BOLD);
-
-    // Update notification (static) on the right side of line 0
-    if (st->latest_version[0] != '\0') {
-        if (version_compare(SHELLBEATS_VERSION, st->latest_version) < 0) {
-            char update_msg[64];
-            snprintf(update_msg, sizeof(update_msg), "Update to v%s", st->latest_version);
-            int msg_x = cols - (int)strlen(update_msg) - 1;
-            if (msg_x > 20) {
-                attron(A_BOLD);
-                mvprintw(0, msg_x, "%s", update_msg);
-                attroff(A_BOLD);
-            }
-        }
-    }
 
     // Line 2-3: Shortcuts (two lines)
     switch (view) {
@@ -3105,11 +3020,11 @@ static void draw_header(AppState *st, int cols, ViewMode view) {
             break;
         case VIEW_PLAYLISTS:
             mvprintw(1, 0, "  Enter: open | c: create | e: rename | p: add YouTube | x: delete | d: download all");
-            mvprintw(2, 0, "  s: surisync | Esc: back | i: about | q: quit");
+            mvprintw(2, 0, "  Esc: back | i: about | q: quit");
             break;
         case VIEW_PLAYLIST_SONGS:
             mvprintw(1, 0, "  Enter: play | Space: pause | n/p: next/prev | R: shuffle | t: jump | Left/Right: seek");
-            mvprintw(2, 0, "  a: add | r: rename | d: download | X: remove | D: download all | u: sync YT | s: surisync | Esc: back");
+            mvprintw(2, 0, "  a: add | r: rename | d: download | X: remove | D: download all | u: sync YT | Esc: back");
             break;
         case VIEW_ADD_TO_PLAYLIST:
             mvprintw(1, 0, "  Enter: add to playlist | c: create new playlist");
@@ -3122,10 +3037,6 @@ static void draw_header(AppState *st, int cols, ViewMode view) {
         case VIEW_ABOUT:
             mvprintw(1, 0, "  Press any key to close");
             move(2, 0);
-            break;
-        case VIEW_SURISYNC:
-            mvprintw(1, 0, "  Up/Down: navigate | Enter: select/toggle");
-            mvprintw(2, 0, "  Esc: close");
             break;
     }
 
@@ -3249,18 +3160,6 @@ static void draw_now_playing(AppState *st, int rows, int cols) {
         if (effective_repeat != REPEAT_OFF) {
             printw(" [REPEAT:%s]", repeat_mode_label(effective_repeat));
         }
-    }
-
-    // NEW: Draw surikata status indicator
-    if (st->surikata_online) {
-        const char *indicator = "SYNC->OK";
-        int ind_x = cols - (int)strlen(indicator) - 1;
-        // Shift left if download status will be shown too
-        attron(A_DIM);
-        if (ind_x > 0) {
-            mvprintw(rows - 1, ind_x, "%s", indicator);
-        }
-        attroff(A_DIM);
     }
 
     // NEW: Draw download status
@@ -3392,14 +3291,6 @@ static void draw_playlists_view(AppState *st, const char *status, int rows, int 
 
         mvprintw(y, 0, "   %3d. %s (%d songs)", idx + 1, pl->name, pl->count);
 
-        if (pl->is_shared) {
-            if (is_selected) attroff(A_REVERSE);
-            attron(A_DIM);
-            printw(" [shared]");
-            attroff(A_DIM);
-            if (is_selected) attron(A_REVERSE);
-        }
-
         if (is_selected) {
             attroff(A_REVERSE);
         }
@@ -3418,11 +3309,6 @@ static void draw_playlist_songs_view(AppState *st, const char *status, int rows,
     printw("%s", pl->name);
     if (pl->is_youtube_playlist) printw(" [YT]");
     attroff(A_BOLD);
-    if (pl->is_shared) {
-        attron(A_DIM);
-        printw(" [shared]");
-        attroff(A_DIM);
-    }
 
     mvprintw(4, cols - 20, "Songs: %d", pl->count);
 
@@ -3816,196 +3702,13 @@ static void draw_about_view(AppState *st, const char *status, int rows, int cols
     refresh();
 }
 
-// NEW: Draw SuriSync overlay menu
-static void draw_surisync_view(AppState *st, const char *status, int rows, int cols) {
-    (void)status;
-
-    int dialog_w = 50;
-    int dialog_h = 20;
-    int start_x = (cols - dialog_w) / 2;
-    int start_y = (rows - dialog_h) / 2;
-
-    // Draw box background
-    for (int y = start_y; y < start_y + dialog_h; y++) {
-        mvhline(y, start_x, ' ', dialog_w);
-    }
-
-    // Draw border
-    attron(A_BOLD);
-    mvaddch(start_y, start_x, ACS_ULCORNER);
-    mvaddch(start_y, start_x + dialog_w - 1, ACS_URCORNER);
-    mvaddch(start_y + dialog_h - 1, start_x, ACS_LLCORNER);
-    mvaddch(start_y + dialog_h - 1, start_x + dialog_w - 1, ACS_LRCORNER);
-    mvhline(start_y, start_x + 1, ACS_HLINE, dialog_w - 2);
-    mvhline(start_y + dialog_h - 1, start_x + 1, ACS_HLINE, dialog_w - 2);
-    mvvline(start_y + 1, start_x, ACS_VLINE, dialog_h - 2);
-    mvvline(start_y + 1, start_x + dialog_w - 1, ACS_VLINE, dialog_h - 2);
-    attroff(A_BOLD);
-
-    // Title
-    const char *title = " SuriSync ";
-    mvprintw(start_y, start_x + (dialog_w - (int)strlen(title)) / 2, "%s", title);
-
-    // Load config to show current state
-    sb_sync_config_t cfg = sb_load_config(st->config_dir);
-    bool linked = (strlen(cfg.token) > 0);
-
-    // Determine current playlist state for share/unshare labels
-    bool has_current_pl = (st->surisync_return_view == VIEW_PLAYLIST_SONGS &&
-                           st->current_playlist_idx >= 0 &&
-                           st->current_playlist_idx < st->playlist_count);
-    bool current_shared = has_current_pl && st->playlists[st->current_playlist_idx].is_shared;
-    const char *current_pl_name = has_current_pl ? st->playlists[st->current_playlist_idx].name : NULL;
-
-    // Menu items (labels)
-    const char *items[] = {
-        "Status",
-        "Link to Surikata",
-        "Unlink",
-        "Push playlists",
-        "Get playlists",
-        NULL, // dynamic: share
-        NULL, // dynamic: unshare
-        NULL, // separator
-        NULL, // auto-sync get toggle
-        NULL, // auto-sync push toggle
-    };
-    int item_count = 10;
-
-    // Help text per item
-    const char *help_lines[][3] = {
-        /* 0 Status    */ {"Check connection to surikata.app", NULL, NULL},
-        /* 1 Link      */ {"Register free at surikata.app", "Setup > Apps > Generate Token, copy/paste", "Enjoy the community, more tools coming!"},
-        /* 2 Unlink    */ {"Remove your token and disconnect", NULL, NULL},
-        /* 3 Push      */ {"Upload all your playlists to Surikata", NULL, NULL},
-        /* 4 Get       */ {"Download your playlists from Surikata", NULL, NULL},
-        /* 5 Share     */ {"Make this playlist visible on your profile", NULL, NULL},
-        /* 6 Unshare   */ {"Hide this playlist from your profile", NULL, NULL},
-        /* 7 sep       */ {NULL, NULL, NULL},
-        /* 8 Auto get  */ {"Automatically download playlists on startup", NULL, NULL},
-        /* 9 Auto push */ {"Automatically upload playlists on exit", NULL, NULL},
-    };
-
-    int content_x = start_x + 3;
-    int y = start_y + 2;
-
-    for (int i = 0; i < item_count; i++) {
-        if (i == 7) {
-            // Separator + section label
-            attron(A_DIM);
-            mvhline(y, start_x + 2, ACS_HLINE, dialog_w - 4);
-            attroff(A_DIM);
-            y++;
-            attron(A_DIM);
-            mvprintw(y, content_x, "Enable both to keep your library in sync");
-            attroff(A_DIM);
-            y++;
-            continue;
-        }
-
-        bool selected = (st->surisync_selected == i);
-
-        if (selected) attron(A_REVERSE);
-
-        // Clear line
-        mvhline(y, start_x + 1, ' ', dialog_w - 2);
-
-        if (i == 8) {
-            mvprintw(y, content_x, "[%c] Auto-sync on startup (get)",
-                     cfg.pull_on_startup ? 'x' : ' ');
-        } else if (i == 9) {
-            mvprintw(y, content_x, "[%c] Auto-sync on quit (push)",
-                     cfg.sync_on_quit ? 'x' : ' ');
-        } else if (i == 5) {
-            const char *marker = selected ? ">" : " ";
-            if (has_current_pl) {
-                mvprintw(y, content_x - 1, "%s Share: %s", marker, current_pl_name);
-                if (current_shared) {
-                    if (selected) attroff(A_REVERSE);
-                    attron(A_DIM);
-                    printw(" [shared]");
-                    attroff(A_DIM);
-                    if (selected) attron(A_REVERSE);
-                }
-            } else {
-                mvprintw(y, content_x - 1, "%s Share playlist", marker);
-                attron(A_DIM);
-                printw(" (open one first)");
-                attroff(A_DIM);
-                if (selected) attron(A_REVERSE);
-            }
-        } else if (i == 6) {
-            const char *marker = selected ? ">" : " ";
-            if (has_current_pl && current_shared) {
-                mvprintw(y, content_x - 1, "%s Unshare: %s", marker, current_pl_name);
-            } else if (has_current_pl) {
-                mvprintw(y, content_x - 1, "%s Unshare: %s", marker, current_pl_name);
-                attron(A_DIM);
-                printw(" (not shared)");
-                attroff(A_DIM);
-                if (selected) attron(A_REVERSE);
-            } else {
-                mvprintw(y, content_x - 1, "%s Unshare playlist", marker);
-                attron(A_DIM);
-                printw(" (open one first)");
-                attroff(A_DIM);
-                if (selected) attron(A_REVERSE);
-            }
-        } else {
-            const char *marker = selected ? ">" : " ";
-            mvprintw(y, content_x - 1, "%s %s", marker, items[i]);
-
-            // Show linked status next to Status item
-            if (i == 0 && linked) {
-                printw("  [linked]");
-            } else if (i == 0) {
-                printw("  [not linked]");
-            }
-        }
-
-        if (selected) attroff(A_REVERSE);
-        y++;
-    }
-
-    // Help area: show help for currently selected item
-    int help_y = start_y + dialog_h - 5;
-    attron(A_DIM);
-    mvhline(help_y, start_x + 2, ACS_HLINE, dialog_w - 4);
-    attroff(A_DIM);
-    help_y++;
-
-    // Clear help lines
-    for (int h = 0; h < 3; h++) {
-        mvhline(help_y + h, start_x + 1, ' ', dialog_w - 2);
-    }
-
-    int sel = st->surisync_selected;
-    if (sel >= 0 && sel < item_count && sel != 7) {
-        attron(A_DIM);
-        for (int h = 0; h < 3; h++) {
-            if (help_lines[sel][h]) {
-                mvprintw(help_y + h, content_x, "%s", help_lines[sel][h]);
-            }
-        }
-        attroff(A_DIM);
-    }
-
-    // Footer
-    attron(A_DIM);
-    mvprintw(start_y + dialog_h - 2, start_x + 2,
-             "Enter: select  Esc: close");
-    attroff(A_DIM);
-
-    refresh();
-}
-
 static void draw_ui(AppState *st, const char *status) {
     erase();
 
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
 
-    draw_header(st, cols, st->view);
+    draw_header(cols, st->view);
 
     switch (st->view) {
         case VIEW_SEARCH:
@@ -4025,9 +3728,6 @@ static void draw_ui(AppState *st, const char *status) {
             break;
         case VIEW_ABOUT:
             draw_about_view(st, status, rows, cols);
-            break;
-        case VIEW_SURISYNC:
-            draw_surisync_view(st, status, rows, cols);
             break;
     }
 
@@ -4293,583 +3993,6 @@ static bool check_dependencies(AppState *st, char *errmsg, size_t errsz) {
 }
 
 // ============================================================================
-// Surikata Sync Helpers
-// ============================================================================
-
-// Convert internal Playlist to sb_playlist_t for sync
-static sb_playlist_t playlist_to_sb(AppState *st, int idx) {
-    sb_playlist_t sb = {0};
-    if (idx < 0 || idx >= st->playlist_count) return sb;
-
-    Playlist *pl = &st->playlists[idx];
-    snprintf(sb.name, sizeof(sb.name), "%s", pl->name);
-    snprintf(sb.type, sizeof(sb.type), "%s", pl->is_youtube_playlist ? "youtube" : "local");
-    sb.is_shared = pl->is_shared;
-    sb.song_count = pl->count;
-
-    if (pl->count > 0) {
-        sb.songs = calloc(pl->count, sizeof(sb_song_t));
-        if (sb.songs) {
-            for (int i = 0; i < pl->count; i++) {
-                if (pl->items[i].title)
-                    snprintf(sb.songs[i].title, sizeof(sb.songs[i].title), "%s", pl->items[i].title);
-                if (pl->items[i].video_id)
-                    snprintf(sb.songs[i].video_id, sizeof(sb.songs[i].video_id), "%s", pl->items[i].video_id);
-                sb.songs[i].duration = pl->items[i].duration;
-            }
-        }
-    }
-
-    return sb;
-}
-
-// Auto-sync a single playlist to server (non-blocking via double-fork)
-static void auto_sync_playlist(AppState *st, int idx) {
-    sb_sync_config_t cfg = sb_load_config(st->config_dir);
-    if (!cfg.enabled || strlen(cfg.token) == 0) return;
-
-    // Load playlist songs if not loaded
-    if (st->playlists[idx].count == 0) {
-        load_playlist_songs(st, idx);
-    }
-
-    sb_playlist_t sb = playlist_to_sb(st, idx);
-
-    // Double-fork to avoid zombie: parent waits for child, child forks grandchild and exits
-    pid_t pid = fork();
-    if (pid == 0) {
-        pid_t pid2 = fork();
-        if (pid2 == 0) {
-            // Grandchild: does the actual work, adopted by init
-            sb_sync_init();
-            sb_push_playlist(&cfg, &sb);
-            sb_sync_cleanup();
-            sb_free_playlist(&sb);
-            _exit(0);
-        }
-        _exit(0); // Child exits immediately
-    } else if (pid > 0) {
-        waitpid(pid, NULL, 0); // Reap child instantly
-    }
-    sb_free_playlist(&sb);
-}
-
-// Write playlists to local JSON files from pull result
-static void write_pulled_playlists(AppState *st, const sb_pull_result_t *pull) {
-    for (int i = 0; i < pull->playlist_count; i++) {
-        sb_playlist_t *sb = &pull->playlists[i];
-
-        // Check if playlist already exists
-        int existing_idx = -1;
-        for (int j = 0; j < st->playlist_count; j++) {
-            if (strcasecmp(st->playlists[j].name, sb->name) == 0) {
-                existing_idx = j;
-                break;
-            }
-        }
-
-        int pl_idx;
-        if (existing_idx >= 0) {
-            pl_idx = existing_idx;
-            // Clear existing songs
-            free_playlist_items(&st->playlists[pl_idx]);
-        } else {
-            // Create new playlist
-            bool is_yt = strcmp(sb->type, "youtube") == 0;
-            pl_idx = create_playlist(st, sb->name, is_yt);
-            if (pl_idx < 0) continue;
-        }
-
-        // Set shared state from server
-        st->playlists[pl_idx].is_shared = sb->is_shared;
-
-        // Add songs
-        Playlist *pl = &st->playlists[pl_idx];
-        for (int s = 0; s < sb->song_count && pl->count < MAX_PLAYLIST_ITEMS; s++) {
-            int idx = pl->count;
-            pl->items[idx].title = strdup(sb->songs[s].title);
-            pl->items[idx].video_id = strdup(sb->songs[s].video_id);
-            char url[256];
-            snprintf(url, sizeof(url), "https://www.youtube.com/watch?v=%s", sb->songs[s].video_id);
-            pl->items[idx].url = strdup(url);
-            pl->items[idx].duration = sb->songs[s].duration;
-            pl->count++;
-        }
-
-        save_playlist(st, pl_idx);
-    }
-    save_playlists_index(st);
-}
-
-// Merge followed playlists (additive-only: add new songs, never remove)
-// Returns total number of new songs added across all playlists
-static int merge_followed_playlists(AppState *st, const sb_follow_check_result_t *follows) {
-    int total_added = 0;
-
-    for (int i = 0; i < follows->count; i++) {
-        sb_followed_playlist_t *fp = &follows->playlists[i];
-
-        // Build local playlist name: "owner/name"
-        char local_name[256];
-        snprintf(local_name, sizeof(local_name), "%s/%s", fp->owner, fp->name);
-
-        // Find or create local playlist
-        int pl_idx = -1;
-        for (int j = 0; j < st->playlist_count; j++) {
-            if (strcasecmp(st->playlists[j].name, local_name) == 0) {
-                pl_idx = j;
-                break;
-            }
-        }
-
-        if (pl_idx < 0) {
-            bool is_yt = strcmp(fp->type, "youtube") == 0;
-            pl_idx = create_playlist(st, local_name, is_yt);
-            if (pl_idx < 0) continue;
-        }
-
-        // Load existing songs so duplicate check works
-        load_playlist_songs(st, pl_idx);
-
-        // Add only new songs (additive-only, checks video_id duplicates)
-        int added = 0;
-        for (int s = 0; s < fp->song_count; s++) {
-            Song song = {0};
-            song.title = strdup(fp->songs[s].title);
-            song.video_id = strdup(fp->songs[s].video_id);
-            char url[256];
-            snprintf(url, sizeof(url), "https://www.youtube.com/watch?v=%s", fp->songs[s].video_id);
-            song.url = strdup(url);
-            song.duration = fp->songs[s].duration;
-
-            if (add_song_to_playlist(st, pl_idx, &song)) {
-                added++;
-            } else {
-                // Not added (duplicate or full), free our copies
-                free(song.title);
-                free(song.video_id);
-                free(song.url);
-            }
-        }
-
-        if (added > 0) {
-            save_playlist(st, pl_idx);
-            total_added += added;
-        }
-    }
-
-    if (total_added > 0) {
-        save_playlists_index(st);
-    }
-
-    return total_added;
-}
-
-// Handle CLI subcommands (called before ncurses init)
-// Returns true if a subcommand was handled (app should exit after)
-static bool handle_sync_commands(int argc, char *argv[], AppState *st) {
-    if (argc < 2) return false;
-
-    const char *cmd = argv[1];
-
-    // ── shellbeats link <token> ──
-    if (strcmp(cmd, "link") == 0) {
-        if (argc < 3) {
-            fprintf(stderr, "Usage: shellbeats link <token>\n");
-            fprintf(stderr, "Get your token from https://surikata.app > Settings > ShellBeats\n");
-            return true;
-        }
-
-        const char *token = argv[2];
-
-        // Validate token format
-        if (strncmp(token, "sb_", 3) != 0 || strlen(token) != 43) {
-            fprintf(stderr, "Error: Invalid token format. Token should start with 'sb_' and be 43 characters.\n");
-            return true;
-        }
-
-        sb_sync_config_t cfg = {0};
-        snprintf(cfg.url, sizeof(cfg.url), "https://surikata.app");
-        snprintf(cfg.token, sizeof(cfg.token), "%s", token);
-        cfg.enabled = true;
-
-        printf("Verifying token... ");
-        fflush(stdout);
-
-        sb_sync_init();
-        sb_verify_result_t verify = sb_verify(&cfg);
-
-        if (!verify.success) {
-            printf("FAILED\n");
-            fprintf(stderr, "Error: %s\n", verify.error_msg);
-            sb_sync_cleanup();
-            return true;
-        }
-
-        printf("OK\n");
-        printf("Linked to Surikata as: %s\n", verify.username);
-
-        // Save config
-        sb_error_t err = sb_save_config(st->config_dir, &cfg);
-        if (err != SB_OK) {
-            fprintf(stderr, "Error saving config: %s\n", sb_error_str(err));
-            sb_sync_cleanup();
-            return true;
-        }
-
-        // Ask if user wants to pull
-        if (verify.playlists_synced > 0) {
-            printf("\n%d playlist(s) found on server. Download them? [y/N] ", verify.playlists_synced);
-            fflush(stdout);
-            int c = getchar();
-            if (c == 'y' || c == 'Y') {
-                printf("Pulling playlists... ");
-                fflush(stdout);
-                sb_pull_result_t pull = sb_pull_all(&cfg);
-                if (pull.success) {
-                    write_pulled_playlists(st, &pull);
-                    printf("OK (%d playlists)\n", pull.playlist_count);
-                    sb_free_pull_result(&pull);
-                } else {
-                    printf("FAILED: %s\n", pull.error_msg);
-                }
-            }
-        }
-
-        printf("\nSync enabled. Playlists will auto-sync on changes.\n");
-        sb_sync_cleanup();
-        return true;
-    }
-
-    // ── shellbeats unlink ──
-    if (strcmp(cmd, "unlink") == 0) {
-        sb_sync_config_t cfg = sb_load_config(st->config_dir);
-        if (strlen(cfg.token) == 0) {
-            printf("Not linked to Surikata.\n");
-            return true;
-        }
-
-        cfg.token[0] = '\0';
-        cfg.enabled = false;
-        sb_save_config(st->config_dir, &cfg);
-        printf("Unlinked from Surikata. Synced data on server is preserved.\n");
-        return true;
-    }
-
-    // ── shellbeats sync ──
-    if (strcmp(cmd, "sync") == 0) {
-        sb_sync_config_t cfg = sb_load_config(st->config_dir);
-        if (strlen(cfg.token) == 0) {
-            fprintf(stderr, "Not linked. Run: shellbeats link <token>\n");
-            return true;
-        }
-
-        printf("Syncing all playlists... ");
-        fflush(stdout);
-
-        // Build sb_playlist_t array from all playlists
-        sb_playlist_t *sb_pls = calloc(st->playlist_count, sizeof(sb_playlist_t));
-        if (!sb_pls && st->playlist_count > 0) {
-            fprintf(stderr, "Memory error\n");
-            return true;
-        }
-
-        for (int i = 0; i < st->playlist_count; i++) {
-            // Ensure songs are loaded
-            if (st->playlists[i].count == 0) {
-                load_playlist_songs(st, i);
-            }
-            sb_pls[i] = playlist_to_sb(st, i);
-        }
-
-        // Read config.json for backup
-        char config_path[16384];
-        snprintf(config_path, sizeof(config_path), "%s/%s", st->config_dir, CONFIG_FILE);
-        char *config_content = NULL;
-        FILE *cf = fopen(config_path, "r");
-        if (cf) {
-            fseek(cf, 0, SEEK_END);
-            long len = ftell(cf);
-            fseek(cf, 0, SEEK_SET);
-            if (len > 0 && len < 65536) {
-                config_content = malloc(len + 1);
-                if (config_content) {
-                    size_t r = fread(config_content, 1, len, cf);
-                    config_content[r] = '\0';
-                }
-            }
-            fclose(cf);
-        }
-
-        sb_sync_init();
-        sb_push_result_t result = sb_push_all(&cfg, sb_pls, st->playlist_count, config_content);
-
-        if (result.success) {
-            printf("OK (%d playlists synced)\n", result.synced_count);
-        } else {
-            printf("FAILED: %s\n", result.error_msg);
-        }
-
-        // Cleanup
-        for (int i = 0; i < st->playlist_count; i++) {
-            sb_free_playlist(&sb_pls[i]);
-        }
-        free(sb_pls);
-        free(config_content);
-        sb_sync_cleanup();
-        return true;
-    }
-
-    // ── shellbeats pull ──
-    if (strcmp(cmd, "pull") == 0) {
-        sb_sync_config_t cfg = sb_load_config(st->config_dir);
-        if (strlen(cfg.token) == 0) {
-            fprintf(stderr, "Not linked. Run: shellbeats link <token>\n");
-            return true;
-        }
-
-        printf("Pulling from server... ");
-        fflush(stdout);
-
-        sb_sync_init();
-        sb_pull_result_t pull = sb_pull_all(&cfg);
-
-        if (pull.success) {
-            write_pulled_playlists(st, &pull);
-            printf("OK (%d playlists)\n", pull.playlist_count);
-            sb_free_pull_result(&pull);
-        } else {
-            printf("FAILED: %s\n", pull.error_msg);
-        }
-
-        sb_sync_cleanup();
-        return true;
-    }
-
-    // ── shellbeats share <playlist_name> ──
-    if (strcmp(cmd, "share") == 0) {
-        if (argc < 3) {
-            fprintf(stderr, "Usage: shellbeats share <playlist_name>\n");
-            // List available playlists
-            if (st->playlist_count > 0) {
-                fprintf(stderr, "\nAvailable playlists:\n");
-                for (int i = 0; i < st->playlist_count; i++) {
-                    fprintf(stderr, "  - %s\n", st->playlists[i].name);
-                }
-            }
-            return true;
-        }
-
-        sb_sync_config_t cfg = sb_load_config(st->config_dir);
-        if (strlen(cfg.token) == 0) {
-            fprintf(stderr, "Not linked. Run: shellbeats link <token>\n");
-            return true;
-        }
-
-        const char *name = argv[2];
-
-        // Find playlist
-        int found = -1;
-        for (int i = 0; i < st->playlist_count; i++) {
-            if (strcasecmp(st->playlists[i].name, name) == 0) {
-                found = i;
-                break;
-            }
-        }
-
-        if (found < 0) {
-            fprintf(stderr, "Playlist '%s' not found.\n", name);
-            return true;
-        }
-
-        // Load songs and push as shared
-        load_playlist_songs(st, found);
-
-        // Update local state
-        st->playlists[found].is_shared = true;
-        save_playlist(st, found);
-
-        sb_playlist_t sb = playlist_to_sb(st, found);
-
-        printf("Sharing '%s'... ", name);
-        fflush(stdout);
-
-        sb_sync_init();
-        sb_push_result_t result = sb_push_playlist(&cfg, &sb);
-        sb_free_playlist(&sb);
-
-        if (result.success) {
-            printf("OK (visible on your Surikata profile)\n");
-        } else {
-            // Revert local on failure
-            st->playlists[found].is_shared = false;
-            save_playlist(st, found);
-            printf("FAILED: %s\n", result.error_msg);
-        }
-
-        sb_sync_cleanup();
-        return true;
-    }
-
-    // ── shellbeats unshare <playlist_name> ──
-    if (strcmp(cmd, "unshare") == 0) {
-        if (argc < 3) {
-            fprintf(stderr, "Usage: shellbeats unshare <playlist_name>\n");
-            return true;
-        }
-
-        sb_sync_config_t cfg = sb_load_config(st->config_dir);
-        if (strlen(cfg.token) == 0) {
-            fprintf(stderr, "Not linked. Run: shellbeats link <token>\n");
-            return true;
-        }
-
-        const char *name = argv[2];
-
-        int found = -1;
-        for (int i = 0; i < st->playlist_count; i++) {
-            if (strcasecmp(st->playlists[i].name, name) == 0) {
-                found = i;
-                break;
-            }
-        }
-
-        if (found < 0) {
-            fprintf(stderr, "Playlist '%s' not found.\n", name);
-            return true;
-        }
-
-        load_playlist_songs(st, found);
-
-        // Update local state
-        st->playlists[found].is_shared = false;
-        save_playlist(st, found);
-
-        sb_playlist_t sb = playlist_to_sb(st, found);
-
-        printf("Unsharing '%s'... ", name);
-        fflush(stdout);
-
-        sb_sync_init();
-        sb_push_result_t result = sb_push_playlist(&cfg, &sb);
-        sb_free_playlist(&sb);
-
-        if (result.success) {
-            printf("OK (no longer visible on profile)\n");
-        } else {
-            // Revert local on failure
-            st->playlists[found].is_shared = true;
-            save_playlist(st, found);
-            printf("FAILED: %s\n", result.error_msg);
-        }
-
-        sb_sync_cleanup();
-        return true;
-    }
-
-    // ── shellbeats status ──
-    if (strcmp(cmd, "status") == 0) {
-        sb_sync_config_t cfg = sb_load_config(st->config_dir);
-        if (strlen(cfg.token) == 0) {
-            printf("Surikata sync: not linked\n");
-            printf("Run: shellbeats link <token>\n");
-            return true;
-        }
-
-        printf("Surikata sync: linked\n");
-        printf("Server: %s\n", cfg.url);
-        printf("Token: %s...%s\n",
-               (char[]){cfg.token[0], cfg.token[1], cfg.token[2], cfg.token[3], '\0'},
-               cfg.token + strlen(cfg.token) - 4);
-
-        printf("Verifying... ");
-        fflush(stdout);
-
-        sb_sync_init();
-        sb_verify_result_t v = sb_verify(&cfg);
-        if (v.success) {
-            printf("OK (user: %s, %d playlists synced)\n", v.username, v.playlists_synced);
-        } else {
-            printf("FAILED: %s\n", v.error_msg);
-        }
-        sb_sync_cleanup();
-
-        return true;
-    }
-
-    // ── shellbeats follow <playlist_id> ──
-    if (strcmp(cmd, "follow") == 0) {
-        if (argc < 3) {
-            fprintf(stderr, "Usage: shellbeats follow <playlist_id>\n");
-            fprintf(stderr, "Get playlist IDs from shared playlist URLs on surikata.app\n");
-            return true;
-        }
-
-        int playlist_id = atoi(argv[2]);
-        if (playlist_id <= 0) {
-            fprintf(stderr, "Error: invalid playlist ID\n");
-            return true;
-        }
-
-        sb_sync_config_t cfg = sb_load_config(st->config_dir);
-        if (strlen(cfg.token) == 0) {
-            fprintf(stderr, "Not linked. Run: shellbeats link <token>\n");
-            return true;
-        }
-
-        printf("Following playlist %d... ", playlist_id);
-        fflush(stdout);
-
-        sb_sync_init();
-        sb_push_result_t r = sb_follow_playlist(&cfg, playlist_id);
-        sb_sync_cleanup();
-
-        if (r.success) {
-            printf("%s\n", r.error_msg);
-        } else {
-            printf("FAILED: %s\n", r.error_msg);
-        }
-        return true;
-    }
-
-    // ── shellbeats unfollow <playlist_id> ──
-    if (strcmp(cmd, "unfollow") == 0) {
-        if (argc < 3) {
-            fprintf(stderr, "Usage: shellbeats unfollow <playlist_id>\n");
-            return true;
-        }
-
-        int playlist_id = atoi(argv[2]);
-        if (playlist_id <= 0) {
-            fprintf(stderr, "Error: invalid playlist ID\n");
-            return true;
-        }
-
-        sb_sync_config_t cfg = sb_load_config(st->config_dir);
-        if (strlen(cfg.token) == 0) {
-            fprintf(stderr, "Not linked. Run: shellbeats link <token>\n");
-            return true;
-        }
-
-        printf("Unfollowing playlist %d... ", playlist_id);
-        fflush(stdout);
-
-        sb_sync_init();
-        sb_push_result_t r = sb_unfollow_playlist(&cfg, playlist_id);
-        sb_sync_cleanup();
-
-        if (r.success) {
-            printf("%s\n", r.error_msg);
-        } else {
-            printf("FAILED: %s\n", r.error_msg);
-        }
-        return true;
-    }
-
-    return false; // Not a sync command
-}
-
-// ============================================================================
 // Main
 // ============================================================================
 
@@ -5023,55 +4146,6 @@ int main(int argc, char *argv[]) {
 
     // Load playlists
     load_playlists(&st);
-
-    // Handle sync CLI commands (link, unlink, sync, pull, share, unshare, status)
-    // These run before ncurses and exit immediately after.
-    if (handle_sync_commands(argc, argv, &st)) {
-        free_all_playlists(&st);
-        return 0;
-    }
-
-    // Version check (public, no auth needed — always runs)
-    {
-        sb_sync_init();
-        sb_sync_config_t cfg = sb_load_config(st.config_dir);
-        sb_check_latest_version(cfg.url, st.latest_version, sizeof(st.latest_version));
-        sb_log("Version check: latest_version='%s' (local=%s)", st.latest_version, SHELLBEATS_VERSION);
-        if (st.latest_version[0] != '\0') {
-            int vcmp = version_compare(SHELLBEATS_VERSION, st.latest_version);
-            sb_log("Version compare: local=%s remote=%s result=%d", SHELLBEATS_VERSION, st.latest_version, vcmp);
-        } else {
-            sb_log("Version check: no version received from server (url='%s')", cfg.url);
-        }
-
-        // SuriSync: startup hooks (pull_on_startup, status check)
-        if (cfg.enabled && strlen(cfg.token) > 0) {
-            sb_verify_result_t vr = sb_verify(&cfg);
-            st.surikata_online = vr.success;
-
-            if (vr.success && cfg.pull_on_startup) {
-                sb_pull_result_t pr = sb_pull_all(&cfg);
-                if (pr.success && pr.playlist_count > 0) {
-                    write_pulled_playlists(&st, &pr);
-                    load_playlists(&st);
-                }
-                sb_free_pull_result(&pr);
-
-                // Check followed playlists for new songs (additive-only)
-                sb_follow_check_result_t fc = sb_check_follows(&cfg);
-                if (fc.success && fc.count > 0) {
-                    int added = merge_followed_playlists(&st, &fc);
-                    if (added > 0) {
-                        load_playlists(&st);
-                        fprintf(stderr, "SuriSync: %d new songs from %d followed playlists\n", added, fc.count);
-                    }
-                }
-                sb_free_follow_check_result(&fc);
-            }
-        }
-
-        sb_sync_cleanup();
-    }
 
     // NEW: Load pending downloads from previous session
     load_download_queue(&st);
@@ -5416,9 +4490,6 @@ int main(int argc, char *argv[]) {
                     status[0] = '\0';
                 } else if (st.view == VIEW_ABOUT) {
                     st.view = VIEW_SEARCH;
-                    status[0] = '\0';
-                } else if (st.view == VIEW_SURISYNC) {
-                    st.view = st.surisync_return_view;
                     status[0] = '\0';
                 }
                 break;
@@ -5877,14 +4948,6 @@ int main(int argc, char *argv[]) {
                             }
                         }
                         break;
-
-                    // NEW: SuriSync overlay
-                    case 's':
-                        st.view = VIEW_SURISYNC;
-                        st.surisync_selected = 0;
-                        st.surisync_return_view = VIEW_PLAYLISTS;
-                        status[0] = '\0';
-                        break;
                 }
                 break;
             }
@@ -6110,14 +5173,6 @@ int main(int argc, char *argv[]) {
                         }
                         break;
 
-                    // NEW: SuriSync overlay
-                    case 's':
-                        st.view = VIEW_SURISYNC;
-                        st.surisync_selected = 0;
-                        st.surisync_return_view = VIEW_PLAYLIST_SONGS;
-                        status[0] = '\0';
-                        break;
-
                     // Rename song title
                     case 'r':
                         if (pl && pl->count > 0 && st.playlist_song_selected < pl->count) {
@@ -6129,7 +5184,6 @@ int main(int argc, char *argv[]) {
                                 free(song->title);
                                 song->title = strdup(new_title);
                                 save_playlist(&st, st.current_playlist_idx);
-                                auto_sync_playlist(&st, st.current_playlist_idx);
                                 snprintf(status, sizeof(status), "Renamed to: %s", new_title);
                             } else if (len == 0) {
                                 snprintf(status, sizeof(status), "Rename cancelled");
@@ -6477,265 +5531,6 @@ int main(int argc, char *argv[]) {
                 break;
             }
 
-            case VIEW_SURISYNC: {
-                switch (ch) {
-                    case KEY_UP:
-                    case 'k':
-                        // Skip separator at index 7
-                        if (st.surisync_selected == 8)
-                            st.surisync_selected = 6;
-                        else if (st.surisync_selected > 0)
-                            st.surisync_selected--;
-                        break;
-
-                    case KEY_DOWN:
-                    case 'j':
-                        if (st.surisync_selected == 6)
-                            st.surisync_selected = 8;
-                        else if (st.surisync_selected < 9)
-                            st.surisync_selected++;
-                        break;
-
-                    case '\n':
-                    case KEY_ENTER: {
-                        sb_sync_config_t cfg = sb_load_config(st.config_dir);
-                        bool linked = (strlen(cfg.token) > 0);
-
-                        switch (st.surisync_selected) {
-                            case 0: { // Status
-                                if (!linked) {
-                                    snprintf(status, sizeof(status), "Not linked. Use 'Link token' first.");
-                                } else {
-                                    snprintf(status, sizeof(status), "Checking status...");
-                                    draw_ui(&st, status);
-
-                                    sb_sync_init();
-                                    sb_verify_result_t vr = sb_verify(&cfg);
-                                    sb_sync_cleanup();
-
-                                    if (vr.success) {
-                                        st.surikata_online = true;
-                                        snprintf(status, sizeof(status),
-                                                 "Online: %s (%d playlists synced)",
-                                                 vr.username, vr.playlists_synced);
-                                    } else {
-                                        st.surikata_online = false;
-                                        snprintf(status, sizeof(status), "Offline: %s", vr.error_msg);
-                                    }
-                                }
-                                break;
-                            }
-
-                            case 1: { // Link token
-                                char token[64] = {0};
-                                int len = get_string_input(token, sizeof(token), "Token (sb_...): ");
-                                if (len > 0) {
-                                    if (strncmp(token, "sb_", 3) != 0 || strlen(token) != 43) {
-                                        snprintf(status, sizeof(status), "Invalid token format (sb_ + 40 hex)");
-                                    } else {
-                                        snprintf(status, sizeof(status), "Verifying...");
-                                        draw_ui(&st, status);
-
-                                        snprintf(cfg.token, sizeof(cfg.token), "%s", token);
-                                        if (strlen(cfg.url) == 0)
-                                            strncpy(cfg.url, "https://surikata.app", sizeof(cfg.url) - 1);
-                                        cfg.enabled = true;
-
-                                        sb_sync_init();
-                                        sb_verify_result_t vr = sb_verify(&cfg);
-                                        sb_sync_cleanup();
-
-                                        if (vr.success) {
-                                            sb_save_config(st.config_dir, &cfg);
-                                            st.surikata_online = true;
-                                            snprintf(status, sizeof(status), "Linked as %s!", vr.username);
-                                        } else {
-                                            snprintf(status, sizeof(status), "Failed: %s", vr.error_msg);
-                                        }
-                                    }
-                                } else {
-                                    snprintf(status, sizeof(status), "Cancelled");
-                                }
-                                break;
-                            }
-
-                            case 2: { // Unlink
-                                if (!linked) {
-                                    snprintf(status, sizeof(status), "Not linked");
-                                } else {
-                                    memset(cfg.token, 0, sizeof(cfg.token));
-                                    cfg.enabled = false;
-                                    sb_save_config(st.config_dir, &cfg);
-                                    st.surikata_online = false;
-                                    snprintf(status, sizeof(status), "Unlinked from Surikata");
-                                }
-                                break;
-                            }
-
-                            case 3: { // Sync (push all)
-                                if (!linked) {
-                                    snprintf(status, sizeof(status), "Not linked");
-                                } else {
-                                    snprintf(status, sizeof(status), "Syncing all playlists...");
-                                    draw_ui(&st, status);
-
-                                    // Build array of all playlists
-                                    sb_playlist_t *sbs = calloc(st.playlist_count, sizeof(sb_playlist_t));
-                                    if (sbs) {
-                                        for (int i = 0; i < st.playlist_count; i++) {
-                                            if (st.playlists[i].count == 0)
-                                                load_playlist_songs(&st, i);
-                                            sbs[i] = playlist_to_sb(&st, i);
-                                        }
-
-                                        sb_sync_init();
-                                        sb_push_result_t pr = sb_push_all(&cfg, sbs, st.playlist_count, NULL);
-                                        sb_sync_cleanup();
-
-                                        for (int i = 0; i < st.playlist_count; i++)
-                                            sb_free_playlist(&sbs[i]);
-                                        free(sbs);
-
-                                        if (pr.success) {
-                                            snprintf(status, sizeof(status),
-                                                     "Synced %d playlists", pr.synced_count);
-                                        } else {
-                                            snprintf(status, sizeof(status), "Sync failed: %s", pr.error_msg);
-                                        }
-                                    }
-                                }
-                                break;
-                            }
-
-                            case 4: { // Pull (download all)
-                                if (!linked) {
-                                    snprintf(status, sizeof(status), "Not linked");
-                                } else {
-                                    snprintf(status, sizeof(status), "Pulling playlists...");
-                                    draw_ui(&st, status);
-
-                                    sb_sync_init();
-                                    sb_pull_result_t pr = sb_pull_all(&cfg);
-                                    sb_sync_cleanup();
-
-                                    if (pr.success) {
-                                        write_pulled_playlists(&st, &pr);
-                                        load_playlists(&st);
-                                        snprintf(status, sizeof(status),
-                                                 "Pulled %d playlists", pr.playlist_count);
-                                    } else {
-                                        snprintf(status, sizeof(status), "Pull failed: %s", pr.error_msg);
-                                    }
-                                    sb_free_pull_result(&pr);
-                                }
-                                break;
-                            }
-
-                            case 5: { // Share current playlist
-                                if (!linked) {
-                                    snprintf(status, sizeof(status), "Not linked");
-                                } else if (st.surisync_return_view != VIEW_PLAYLIST_SONGS ||
-                                           st.current_playlist_idx < 0) {
-                                    snprintf(status, sizeof(status), "Open a playlist first");
-                                } else {
-                                    int idx = st.current_playlist_idx;
-                                    if (st.playlists[idx].is_shared) {
-                                        snprintf(status, sizeof(status), "Already shared");
-                                        break;
-                                    }
-                                    if (st.playlists[idx].count == 0)
-                                        load_playlist_songs(&st, idx);
-
-                                    // Set local flag first
-                                    st.playlists[idx].is_shared = true;
-                                    save_playlist(&st, idx);
-
-                                    sb_playlist_t sb = playlist_to_sb(&st, idx);
-
-                                    snprintf(status, sizeof(status), "Sharing '%s'...", sb.name);
-                                    draw_ui(&st, status);
-
-                                    sb_sync_init();
-                                    sb_push_result_t pr = sb_push_playlist(&cfg, &sb);
-                                    sb_sync_cleanup();
-                                    sb_free_playlist(&sb);
-
-                                    if (pr.success) {
-                                        snprintf(status, sizeof(status), "Shared '%s'",
-                                                 st.playlists[idx].name);
-                                    } else {
-                                        // Revert local on failure
-                                        st.playlists[idx].is_shared = false;
-                                        save_playlist(&st, idx);
-                                        snprintf(status, sizeof(status), "Failed: %s", pr.error_msg);
-                                    }
-                                }
-                                break;
-                            }
-
-                            case 6: { // Unshare current playlist
-                                if (!linked) {
-                                    snprintf(status, sizeof(status), "Not linked");
-                                } else if (st.surisync_return_view != VIEW_PLAYLIST_SONGS ||
-                                           st.current_playlist_idx < 0) {
-                                    snprintf(status, sizeof(status), "Open a playlist first");
-                                } else {
-                                    int idx = st.current_playlist_idx;
-                                    if (!st.playlists[idx].is_shared) {
-                                        snprintf(status, sizeof(status), "Not shared");
-                                        break;
-                                    }
-                                    if (st.playlists[idx].count == 0)
-                                        load_playlist_songs(&st, idx);
-
-                                    // Set local flag first
-                                    st.playlists[idx].is_shared = false;
-                                    save_playlist(&st, idx);
-
-                                    sb_playlist_t sb = playlist_to_sb(&st, idx);
-
-                                    snprintf(status, sizeof(status), "Unsharing '%s'...", sb.name);
-                                    draw_ui(&st, status);
-
-                                    sb_sync_init();
-                                    sb_push_result_t pr = sb_push_playlist(&cfg, &sb);
-                                    sb_sync_cleanup();
-                                    sb_free_playlist(&sb);
-
-                                    if (pr.success) {
-                                        snprintf(status, sizeof(status), "Unshared '%s'",
-                                                 st.playlists[idx].name);
-                                    } else {
-                                        // Revert local on failure
-                                        st.playlists[idx].is_shared = true;
-                                        save_playlist(&st, idx);
-                                        snprintf(status, sizeof(status), "Failed: %s", pr.error_msg);
-                                    }
-                                }
-                                break;
-                            }
-
-                            case 8: { // Toggle pull_on_startup
-                                cfg.pull_on_startup = !cfg.pull_on_startup;
-                                sb_save_config(st.config_dir, &cfg);
-                                snprintf(status, sizeof(status), "Pull on startup: %s",
-                                         cfg.pull_on_startup ? "ON" : "OFF");
-                                break;
-                            }
-
-                            case 9: { // Toggle sync_on_quit
-                                cfg.sync_on_quit = !cfg.sync_on_quit;
-                                sb_save_config(st.config_dir, &cfg);
-                                snprintf(status, sizeof(status), "Sync on quit: %s",
-                                         cfg.sync_on_quit ? "ON" : "OFF");
-                                break;
-                            }
-                        }
-                        break;
-                    }
-                }
-                break;
-            }
         }
 
         draw_ui(&st, status);
@@ -6775,40 +5570,6 @@ int main(int argc, char *argv[]) {
     pthread_mutex_destroy(&st.download_queue.mutex);
 
     endwin();
-
-    // SuriSync: sync on quit (after endwin so output is visible)
-    {
-        sb_sync_config_t cfg = sb_load_config(st.config_dir);
-        if (cfg.enabled && strlen(cfg.token) > 0 && cfg.sync_on_quit) {
-            sb_playlist_t *sbs = calloc(st.playlist_count, sizeof(sb_playlist_t));
-            if (sbs) {
-                for (int i = 0; i < st.playlist_count; i++) {
-                    if (st.playlists[i].count == 0)
-                        load_playlist_songs(&st, i);
-                    sbs[i] = playlist_to_sb(&st, i);
-                }
-
-                sb_sync_init();
-                sb_push_result_t pr = sb_push_all(&cfg, sbs, st.playlist_count, NULL);
-                sb_sync_cleanup();
-
-                if (!pr.success) {
-                    fprintf(stderr, "SuriSync: push failed: %s\n", pr.error_msg);
-                }
-
-                for (int i = 0; i < st.playlist_count; i++)
-                    sb_free_playlist(&sbs[i]);
-                free(sbs);
-            }
-        }
-    }
-
-    // Version update notice at exit
-    if (st.latest_version[0] != '\0') {
-        if (version_compare(SHELLBEATS_VERSION, st.latest_version) < 0) {
-            fprintf(stderr, "NEW VERSION AVAILABLE: v%s (current: v%s)\n", st.latest_version, SHELLBEATS_VERSION);
-        }
-    }
 
     // Cleanup
     free_search_results(&st);
