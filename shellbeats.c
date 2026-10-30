@@ -118,7 +118,8 @@ typedef enum {
     VIEW_PLAYLIST_SONGS,
     VIEW_ADD_TO_PLAYLIST,
     VIEW_SETTINGS,
-    VIEW_ABOUT
+    VIEW_ABOUT,
+    VIEW_COUNT  // Number of views, not a real view
 } ViewMode;
 
 typedef enum {
@@ -208,6 +209,8 @@ typedef struct {
     // NEW: Spinner state for download progress
     int spinner_frame;
     time_t last_spinner_update;
+
+    char status[STATUS_LEN];        // Status line message shown under the header
 
     // Shuffle mode
     bool shuffle_mode;
@@ -3077,6 +3080,8 @@ static void draw_header(int cols, ViewMode view) {
             mvprintw(1, 0, "  Press any key to close");
             move(2, 0);
             break;
+        case VIEW_COUNT:
+            break;
     }
 
     mvhline(3, 0, ACS_HLINE, cols);
@@ -3212,7 +3217,7 @@ static int list_page_size(int rows) {
     return size < 1 ? 1 : size;
 }
 
-static void draw_search_view(AppState *st, const char *status, int rows, int cols) {
+static void draw_search_view(AppState *st, int rows, int cols) {
     mvprintw(4, 0, "Query: ");
     attron(A_BOLD);
     printw("%s", st->query[0] ? st->query : "(none)");
@@ -3220,8 +3225,8 @@ static void draw_search_view(AppState *st, const char *status, int rows, int col
 
     mvprintw(4, cols - 20, "Results: %d", st->search_count);
 
-    if (status && status[0]) {
-        mvprintw(5, 0, ">>> %s", status);
+    if (st->status[0]) {
+        mvprintw(5, 0, ">>> %s", st->status);
     }
 
     mvhline(6, 0, ACS_HLINE, cols);
@@ -3290,12 +3295,12 @@ static void draw_search_view(AppState *st, const char *status, int rows, int col
     }
 }
 
-static void draw_playlists_view(AppState *st, const char *status, int rows, int cols) {
+static void draw_playlists_view(AppState *st, int rows, int cols) {
     mvprintw(4, 0, "Playlists");
     mvprintw(4, cols - 20, "Total: %d", st->playlist_count);
 
-    if (status && status[0]) {
-        mvprintw(5, 0, ">>> %s", status);
+    if (st->status[0]) {
+        mvprintw(5, 0, ">>> %s", st->status);
     }
 
     mvhline(6, 0, ACS_HLINE, cols);
@@ -3341,7 +3346,7 @@ static void draw_playlists_view(AppState *st, const char *status, int rows, int 
     }
 }
 
-static void draw_playlist_songs_view(AppState *st, const char *status, int rows, int cols) {
+static void draw_playlist_songs_view(AppState *st, int rows, int cols) {
     if (st->current_playlist_idx < 0 || st->current_playlist_idx >= st->playlist_count) {
         return;
     }
@@ -3356,8 +3361,8 @@ static void draw_playlist_songs_view(AppState *st, const char *status, int rows,
 
     mvprintw(4, cols - 20, "Songs: %d", pl->count);
 
-    if (status && status[0]) {
-        mvprintw(5, 0, ">>> %s", status);
+    if (st->status[0]) {
+        mvprintw(5, 0, ">>> %s", st->status);
     }
 
     mvhline(6, 0, ACS_HLINE, cols);
@@ -3433,7 +3438,7 @@ static void draw_playlist_songs_view(AppState *st, const char *status, int rows,
     }
 }
 
-static void draw_add_to_playlist_view(AppState *st, const char *status, int rows, int cols) {
+static void draw_add_to_playlist_view(AppState *st, int rows, int cols) {
     mvprintw(2, 0, "Add to playlist: ");
     if (st->song_to_add && st->song_to_add->title) {
         attron(A_BOLD);
@@ -3451,8 +3456,8 @@ static void draw_add_to_playlist_view(AppState *st, const char *status, int rows
         attroff(A_BOLD);
     }
 
-    if (status && status[0]) {
-        mvprintw(5, 0, ">>> %s", status);
+    if (st->status[0]) {
+        mvprintw(5, 0, ">>> %s", st->status);
     }
 
     mvhline(6, 0, ACS_HLINE, cols);
@@ -3494,12 +3499,12 @@ static void draw_add_to_playlist_view(AppState *st, const char *status, int rows
 }
 
 // NEW: Draw settings view
-static void draw_settings_view(AppState *st, const char *status, int rows, int cols) {
+static void draw_settings_view(AppState *st, int rows, int cols) {
     (void)rows; // Suppress unused parameter warning
     mvprintw(4, 0, "Settings");
 
-    if (status && status[0]) {
-        mvprintw(5, 0, ">>> %s", status);
+    if (st->status[0]) {
+        mvprintw(5, 0, ">>> %s", st->status);
     }
 
     mvhline(6, 0, ACS_HLINE, cols);
@@ -3692,9 +3697,9 @@ static void draw_exit_dialog(AppState *st, int pending_count) {
 }
 
 // NEW: Draw About overlay
-static void draw_about_view(AppState *st, const char *status, int rows, int cols) {
+static void draw_about_view(AppState *st, int rows, int cols) {
     (void)st; // Unused
-    (void)status; // Unused
+    (void)st->status; // Unused
 
     int dialog_w = 60;
     int dialog_h = 16;
@@ -3744,7 +3749,7 @@ static void draw_about_view(AppState *st, const char *status, int rows, int cols
     refresh();
 }
 
-static void draw_ui(AppState *st, const char *status) {
+static void draw_ui(AppState *st) {
     erase();
 
     int rows, cols;
@@ -3754,22 +3759,24 @@ static void draw_ui(AppState *st, const char *status) {
 
     switch (st->view) {
         case VIEW_SEARCH:
-            draw_search_view(st, status, rows, cols);
+            draw_search_view(st, rows, cols);
             break;
         case VIEW_PLAYLISTS:
-            draw_playlists_view(st, status, rows, cols);
+            draw_playlists_view(st, rows, cols);
             break;
         case VIEW_PLAYLIST_SONGS:
-            draw_playlist_songs_view(st, status, rows, cols);
+            draw_playlist_songs_view(st, rows, cols);
             break;
         case VIEW_ADD_TO_PLAYLIST:
-            draw_add_to_playlist_view(st, status, rows, cols);
+            draw_add_to_playlist_view(st, rows, cols);
             break;
         case VIEW_SETTINGS:
-            draw_settings_view(st, status, rows, cols);
+            draw_settings_view(st, rows, cols);
             break;
         case VIEW_ABOUT:
-            draw_about_view(st, status, rows, cols);
+            draw_about_view(st, rows, cols);
+            break;
+        case VIEW_COUNT:
             break;
     }
 
@@ -3791,7 +3798,7 @@ static void youtube_fetch_progress_callback(int count, const char *message, void
 
         // Redraw UI to show progress
         if (g_app_state) {
-            draw_ui(g_app_state, status_buf);
+            draw_ui(g_app_state);
             refresh(); // Force screen update
         }
     }
@@ -4168,7 +4175,7 @@ static void open_log_if_requested(int argc, char *argv[]) {
 }
 
 // Restore the last search or playlist if remember_session is enabled
-static void restore_session(AppState *st, char *status) {
+static void restore_session(AppState *st) {
     if (st->config.remember_session) {
         if (st->was_playing_playlist && st->last_playlist_idx >= 0 &&
             st->last_playlist_idx < st->playlist_count) {
@@ -4179,7 +4186,7 @@ static void restore_session(AppState *st, char *status) {
                 st->playlist_song_selected = st->last_song_idx;
             }
             st->view = VIEW_PLAYLIST_SONGS;
-            snprintf(status, STATUS_LEN, "Resuming: %s, track %d",
+            snprintf(st->status, STATUS_LEN, "Resuming: %s, track %d",
                      st->playlists[st->current_playlist_idx].name,
                      st->last_song_idx + 1);
         } else if (st->cached_search_count > 0 && st->last_query[0]) {
@@ -4197,19 +4204,19 @@ static void restore_session(AppState *st, char *status) {
                 st->search_selected = st->last_song_idx;
             }
             st->view = VIEW_SEARCH;
-            snprintf(status, STATUS_LEN, "Resuming: search '%s', track %d",
+            snprintf(st->status, STATUS_LEN, "Resuming: search '%s', track %d",
                      st->query, st->last_song_idx + 1);
         } else {
-            snprintf(status, STATUS_LEN, "Press / to search, d to download, f for playlists, h for help.");
+            snprintf(st->status, STATUS_LEN, "Press / to search, d to download, f for playlists, h for help.");
         }
     } else {
-        snprintf(status, STATUS_LEN, "Press / to search, d to download, f for playlists, h for help.");
+        snprintf(st->status, STATUS_LEN, "Press / to search, d to download, f for playlists, h for help.");
     }
 }
 
 // Check for track end via mpv IPC and auto-play the next track.
 // Only check if we've been playing for at least 3 seconds.
-static void check_track_end(AppState *st, time_t now, char *status) {
+static void check_track_end(AppState *st, time_t now) {
     if (st->playing_index >= 0 && mpv_ipc_fd >= 0) {
         if (now - st->playback_started >= 3) {
             if (mpv_check_track_end()) {
@@ -4226,12 +4233,12 @@ static void check_track_end(AppState *st, time_t now, char *status) {
                         title = st->search_results[st->playing_index].title;
                     }
                     if (title) {
-                        snprintf(status, STATUS_LEN, "Auto-playing: %s", title);
+                        snprintf(st->status, STATUS_LEN, "Auto-playing: %s", title);
                     }
                 } else {
-                    snprintf(status, STATUS_LEN, "Playback finished");
+                    snprintf(st->status, STATUS_LEN, "Playback finished");
                 }
-                draw_ui(st, status);
+                draw_ui(st);
             }
         } else {
             // During grace period, still drain the socket buffer
@@ -4244,12 +4251,12 @@ static void check_track_end(AppState *st, time_t now, char *status) {
 }
 
 // Handle a key while editing a settings field
-static void handle_settings_edit_key(AppState *st, int ch, char *status) {
+static void handle_settings_edit_key(AppState *st, int ch) {
     switch (ch) {
         case 27: // Escape - cancel editing
             st->settings_editing = false;
             curs_set(0);
-            snprintf(status, STATUS_LEN, "Edit cancelled");
+            snprintf(st->status, STATUS_LEN, "Edit cancelled");
             break;
 
         case '\n':
@@ -4262,7 +4269,7 @@ static void handle_settings_edit_key(AppState *st, int ch, char *status) {
                 save_config(st);
                 st->settings_editing = false;
                 curs_set(0);
-                snprintf(status, STATUS_LEN, "Cookies file path saved");
+                snprintf(st->status, STATUS_LEN, "Cookies file path saved");
             } else {
                 // Default: download path (settings_selected == 0)
                 strncpy(st->config.download_path, st->settings_edit_buffer,
@@ -4271,7 +4278,7 @@ static void handle_settings_edit_key(AppState *st, int ch, char *status) {
                 save_config(st);
                 st->settings_editing = false;
                 curs_set(0);
-                snprintf(status, STATUS_LEN, "Download path saved");
+                snprintf(st->status, STATUS_LEN, "Download path saved");
             }
             break;
 
@@ -4328,29 +4335,29 @@ static void handle_settings_edit_key(AppState *st, int ch, char *status) {
 }
 
 // Handle keys that work in every view. View-specific handling runs afterwards.
-static void handle_global_key(AppState *st, int ch, char *status) {
+static void handle_global_key(AppState *st, int ch) {
     switch (ch) {
         case ' ':
             if (st->playing_index >= 0 && file_exists(IPC_SOCKET)) {
                 mpv_toggle_pause();
                 st->paused = !st->paused;
-                snprintf(status, STATUS_LEN, st->paused ? "Paused" : "Playing");
+                snprintf(st->status, STATUS_LEN, st->paused ? "Paused" : "Playing");
             }
             break;
 
         case 'n':
             if (st->playing_index >= 0) {
                 play_next(st);
-                snprintf(status, STATUS_LEN, "Next track");
+                snprintf(st->status, STATUS_LEN, "Next track");
             }
             break;
 
         case 'p':
             if (st->playing_index >= 0) {
                 if (play_prev(st))
-                    snprintf(status, STATUS_LEN, "Previous track");
+                    snprintf(st->status, STATUS_LEN, "Previous track");
                 else
-                    snprintf(status, STATUS_LEN, "Already at first track");
+                    snprintf(st->status, STATUS_LEN, "Already at first track");
             }
             break;
 
@@ -4363,20 +4370,20 @@ static void handle_global_key(AppState *st, int ch, char *status) {
             st->shuffle_mode = !st->shuffle_mode;
             free_shuffle_order(st);
             save_config(st);
-            snprintf(status, STATUS_LEN, "Shuffle: %s", st->shuffle_mode ? "ON" : "OFF");
+            snprintf(st->status, STATUS_LEN, "Shuffle: %s", st->shuffle_mode ? "ON" : "OFF");
             break;
 
         case 'L': // Cycle repeat mode
             st->repeat_mode = next_repeat_mode(st->repeat_mode);
             save_config(st);
-            snprintf(status, STATUS_LEN, "Repeat: %s", repeat_mode_label(st->repeat_mode));
+            snprintf(st->status, STATUS_LEN, "Repeat: %s", repeat_mode_label(st->repeat_mode));
             break;
 
         case KEY_LEFT:
             // Seek backward (only when not editing in settings)
             if (st->view != VIEW_SETTINGS && st->playing_index >= 0 && file_exists(IPC_SOCKET)) {
                 mpv_seek(-st->config.seek_step);
-                snprintf(status, STATUS_LEN, "<< -%ds", st->config.seek_step);
+                snprintf(st->status, STATUS_LEN, "<< -%ds", st->config.seek_step);
             }
             break;
 
@@ -4384,7 +4391,7 @@ static void handle_global_key(AppState *st, int ch, char *status) {
             // Seek forward (only when not editing in settings)
             if (st->view != VIEW_SETTINGS && st->playing_index >= 0 && file_exists(IPC_SOCKET)) {
                 mpv_seek(st->config.seek_step);
-                snprintf(status, STATUS_LEN, ">> +%ds", st->config.seek_step);
+                snprintf(st->status, STATUS_LEN, ">> +%ds", st->config.seek_step);
             }
             break;
 
@@ -4398,9 +4405,9 @@ static void handle_global_key(AppState *st, int ch, char *status) {
                         sscanf(time_input, "%d", &secs) == 1) {
                         int total_secs = mins * 60 + secs;
                         mpv_seek_absolute(total_secs);
-                        snprintf(status, STATUS_LEN, "Jump to %d:%02d", mins, secs);
+                        snprintf(st->status, STATUS_LEN, "Jump to %d:%02d", mins, secs);
                     } else {
-                        snprintf(status, STATUS_LEN, "Invalid time format");
+                        snprintf(st->status, STATUS_LEN, "Invalid time format");
                     }
                 }
             }
@@ -4408,7 +4415,7 @@ static void handle_global_key(AppState *st, int ch, char *status) {
 
         case 'i': // About
             st->view = VIEW_ABOUT;
-            draw_ui(st, status);
+            draw_ui(st);
             timeout(-1);
             getch(); // Wait for any key
             timeout(100);
@@ -4418,20 +4425,20 @@ static void handle_global_key(AppState *st, int ch, char *status) {
         case 27: // Escape
             if (st->view == VIEW_PLAYLISTS) {
                 st->view = VIEW_SEARCH;
-                status[0] = '\0';
+                st->status[0] = '\0';
             } else if (st->view == VIEW_PLAYLIST_SONGS) {
                 st->view = VIEW_PLAYLISTS;
-                status[0] = '\0';
+                st->status[0] = '\0';
             } else if (st->view == VIEW_ADD_TO_PLAYLIST) {
                 st->view = VIEW_SEARCH;
                 st->song_to_add = NULL;
-                snprintf(status, STATUS_LEN, "Cancelled");
+                snprintf(st->status, STATUS_LEN, "Cancelled");
             } else if (st->view == VIEW_SETTINGS) {
                 st->view = VIEW_SEARCH;
-                status[0] = '\0';
+                st->status[0] = '\0';
             } else if (st->view == VIEW_ABOUT) {
                 st->view = VIEW_SEARCH;
-                status[0] = '\0';
+                st->status[0] = '\0';
             }
             break;
 
@@ -4457,7 +4464,9 @@ static bool confirm_quit(AppState *st) {
 }
 
 // Handle a key in the search results
-static void handle_search_key(AppState *st, int ch, char *status, int page_size) {
+static void handle_search_key(AppState *st, int ch) {
+    int page_size = list_page_size(getmaxy(stdscr));
+
     switch (ch) {
         case KEY_UP:
         case 'k':
@@ -4501,7 +4510,7 @@ static void handle_search_key(AppState *st, int ch, char *status, int page_size)
         case KEY_ENTER:
             if (st->search_count > 0) {
                 play_search_result(st, st->search_selected);
-                snprintf(status, STATUS_LEN, "Playing: %s",
+                snprintf(st->status, STATUS_LEN, "Playing: %s",
                          st->search_results[st->search_selected].title ?
                          st->search_results[st->search_selected].title : "?");
             }
@@ -4512,24 +4521,24 @@ static void handle_search_key(AppState *st, int ch, char *status, int page_size)
             char q[256] = {0};
             int len = get_string_input(q, sizeof(q), "Search: ");
             if (len > 0) {
-                snprintf(status, STATUS_LEN, "Searching: %s ...", q);
-                draw_ui(st, status);
+                snprintf(st->status, STATUS_LEN, "Searching: %s ...", q);
+                draw_ui(st);
 
                 int r = run_search(st, q);
                 if (r < 0) {
-                    snprintf(status, STATUS_LEN, "Search error!");
+                    snprintf(st->status, STATUS_LEN, "Search error!");
                 } else if (r == 0) {
                     if (st->yt_blocked) {
-                        snprintf(status, STATUS_LEN,
+                        snprintf(st->status, STATUS_LEN,
                                  "YouTube blocked the request. Press 'S' -> Cookies Mode to fix.");
                     } else {
-                        snprintf(status, STATUS_LEN, "No results for: %s", q);
+                        snprintf(st->status, STATUS_LEN, "No results for: %s", q);
                     }
                 } else {
-                    snprintf(status, STATUS_LEN, "Found %d results for: %s", r, q);
+                    snprintf(st->status, STATUS_LEN, "Found %d results for: %s", r, q);
                 }
             } else {
-                snprintf(status, STATUS_LEN, "Search cancelled");
+                snprintf(st->status, STATUS_LEN, "Search cancelled");
             }
             break;
         }
@@ -4541,7 +4550,7 @@ static void handle_search_key(AppState *st, int ch, char *status, int page_size)
                 st->playing_from_playlist = false;
                 st->playing_playlist_idx = -1;
                 st->paused = false;
-                snprintf(status, STATUS_LEN, "Playback stopped");
+                snprintf(st->status, STATUS_LEN, "Playback stopped");
             }
             break;
 
@@ -4550,7 +4559,7 @@ static void handle_search_key(AppState *st, int ch, char *status, int page_size)
             st->playlist_selected = 0;
             st->playlist_scroll = 0;
             load_playlists(st);
-            snprintf(status, STATUS_LEN, "Playlists");
+            snprintf(st->status, STATUS_LEN, "Playlists");
             break;
 
         case 'a':
@@ -4559,9 +4568,9 @@ static void handle_search_key(AppState *st, int ch, char *status, int page_size)
                 st->add_to_playlist_selected = 0;
                 st->add_to_playlist_scroll = 0;
                 st->view = VIEW_ADD_TO_PLAYLIST;
-                snprintf(status, STATUS_LEN, "Select playlist");
+                snprintf(st->status, STATUS_LEN, "Select playlist");
             } else {
-                snprintf(status, STATUS_LEN, "No song selected");
+                snprintf(st->status, STATUS_LEN, "No song selected");
             }
             break;
 
@@ -4571,14 +4580,14 @@ static void handle_search_key(AppState *st, int ch, char *status, int page_size)
             if (len > 0) {
                 int idx = create_playlist(st, name, false);
                 if (idx >= 0) {
-                    snprintf(status, STATUS_LEN, "Created playlist: %s", name);
+                    snprintf(st->status, STATUS_LEN, "Created playlist: %s", name);
                 } else if (idx == -2) {
-                    snprintf(status, STATUS_LEN, "Playlist already exists: %s", name);
+                    snprintf(st->status, STATUS_LEN, "Playlist already exists: %s", name);
                 } else {
-                    snprintf(status, STATUS_LEN, "Failed to create playlist");
+                    snprintf(st->status, STATUS_LEN, "Failed to create playlist");
                 }
             } else {
-                snprintf(status, STATUS_LEN, "Cancelled");
+                snprintf(st->status, STATUS_LEN, "Cancelled");
             }
             break;
         }
@@ -4588,35 +4597,37 @@ static void handle_search_key(AppState *st, int ch, char *status, int page_size)
             st->view = VIEW_SETTINGS;
             st->settings_selected = 0;
             st->settings_editing = false;
-            snprintf(status, STATUS_LEN, "Settings");
+            snprintf(st->status, STATUS_LEN, "Settings");
             break;
 
         // NEW: Download single song from search
         case 'd':
             if (st->search_count > 0) {
                 if (!st->ffmpeg_available) {
-                    snprintf(status, STATUS_LEN,
+                    snprintf(st->status, STATUS_LEN,
                              "ffmpeg not found - required for downloads");
                     break;
                 }
                 Song *song = &st->search_results[st->search_selected];
                 int result = add_to_download_queue(st, song->video_id, song->title, NULL);
                 if (result > 0) {
-                    snprintf(status, STATUS_LEN, "Queued: %s", song->title);
+                    snprintf(st->status, STATUS_LEN, "Queued: %s", song->title);
                 } else if (result == 0) {
-                    snprintf(status, STATUS_LEN, "Already downloaded or queued");
+                    snprintf(st->status, STATUS_LEN, "Already downloaded or queued");
                 } else {
-                    snprintf(status, STATUS_LEN, "Failed to queue download");
+                    snprintf(st->status, STATUS_LEN, "Failed to queue download");
                 }
             } else {
-                snprintf(status, STATUS_LEN, "No song selected");
+                snprintf(st->status, STATUS_LEN, "No song selected");
             }
             break;
     }
 }
 
 // Handle a key in the playlists list
-static void handle_playlists_key(AppState *st, int ch, char *status, int page_size) {
+static void handle_playlists_key(AppState *st, int ch) {
+    int page_size = list_page_size(getmaxy(stdscr));
+
     switch (ch) {
         case KEY_UP:
         case 'k':
@@ -4652,7 +4663,7 @@ static void handle_playlists_key(AppState *st, int ch, char *status, int page_si
                 st->playlist_song_selected = 0;
                 st->playlist_song_scroll = 0;
                 st->view = VIEW_PLAYLIST_SONGS;
-                snprintf(status, STATUS_LEN, "Opened: %s",
+                snprintf(st->status, STATUS_LEN, "Opened: %s",
                          st->playlists[st->current_playlist_idx].name);
             }
             break;
@@ -4663,15 +4674,15 @@ static void handle_playlists_key(AppState *st, int ch, char *status, int page_si
             if (len > 0) {
                 int idx = create_playlist(st, name, false);
                 if (idx >= 0) {
-                    snprintf(status, STATUS_LEN, "Created playlist: %s", name);
+                    snprintf(st->status, STATUS_LEN, "Created playlist: %s", name);
                     st->playlist_selected = idx;
                 } else if (idx == -2) {
-                    snprintf(status, STATUS_LEN, "Playlist already exists: %s", name);
+                    snprintf(st->status, STATUS_LEN, "Playlist already exists: %s", name);
                 } else {
-                    snprintf(status, STATUS_LEN, "Failed to create playlist");
+                    snprintf(st->status, STATUS_LEN, "Failed to create playlist");
                 }
             } else {
-                snprintf(status, STATUS_LEN, "Cancelled");
+                snprintf(st->status, STATUS_LEN, "Cancelled");
             }
             break;
         }
@@ -4685,15 +4696,15 @@ static void handle_playlists_key(AppState *st, int ch, char *status, int page_si
                 get_string_input(confirm, sizeof(confirm), prompt);
                 if (confirm[0] == 'y' || confirm[0] == 'Y') {
                     if (delete_playlist(st, st->playlist_selected)) {
-                        snprintf(status, STATUS_LEN, "Deleted playlist");
+                        snprintf(st->status, STATUS_LEN, "Deleted playlist");
                         if (st->playlist_selected >= st->playlist_count && st->playlist_count > 0) {
                             st->playlist_selected = st->playlist_count - 1;
                         }
                     } else {
-                        snprintf(status, STATUS_LEN, "Failed to delete");
+                        snprintf(st->status, STATUS_LEN, "Failed to delete");
                     }
                 } else {
-                    snprintf(status, STATUS_LEN, "Cancelled");
+                    snprintf(st->status, STATUS_LEN, "Cancelled");
                 }
             }
             break;
@@ -4716,7 +4727,7 @@ static void handle_playlists_key(AppState *st, int ch, char *status, int page_si
                         }
                     }
                     if (exists) {
-                        snprintf(status, STATUS_LEN, "Playlist '%s' already exists", new_name);
+                        snprintf(st->status, STATUS_LEN, "Playlist '%s' already exists", new_name);
                     } else {
                         // Rename the playlist
                         char old_json_path[4096], new_json_path[4096];
@@ -4779,13 +4790,13 @@ static void handle_playlists_key(AppState *st, int ch, char *status, int page_si
                             save_playlists_index(st);
                             save_playlist(st, st->playlist_selected);
 
-                            snprintf(status, STATUS_LEN, "Renamed to '%s'", new_name);
+                            snprintf(st->status, STATUS_LEN, "Renamed to '%s'", new_name);
                         } else {
-                            snprintf(status, STATUS_LEN, "Failed to rename playlist");
+                            snprintf(st->status, STATUS_LEN, "Failed to rename playlist");
                         }
                     }
                 } else {
-                    snprintf(status, STATUS_LEN, "Cancelled");
+                    snprintf(st->status, STATUS_LEN, "Cancelled");
                 }
             }
             break;
@@ -4796,12 +4807,12 @@ static void handle_playlists_key(AppState *st, int ch, char *status, int page_si
             int len = get_string_input(url, sizeof(url), "YouTube playlist URL: ");
             if (len > 0) {
                 if (!validate_youtube_playlist_url(url)) {
-                    snprintf(status, STATUS_LEN, "Invalid URL");
+                    snprintf(st->status, STATUS_LEN, "Invalid URL");
                     break;
                 }
 
-                snprintf(status, STATUS_LEN, "Validating URL...");
-                draw_ui(st, status);
+                snprintf(st->status, STATUS_LEN, "Validating URL...");
+                draw_ui(st);
 
                 char fetched_title[256] = {0};
                 Song temp_songs[MAX_PLAYLIST_ITEMS];
@@ -4809,10 +4820,10 @@ static void handle_playlists_key(AppState *st, int ch, char *status, int page_si
                 build_cookie_args(st, yt_cookie_args, sizeof(yt_cookie_args));
                 int fetched = fetch_youtube_playlist(url, temp_songs, MAX_PLAYLIST_ITEMS,
                                                      fetched_title, sizeof(fetched_title),
-                                                     youtube_fetch_progress_callback, status,
+                                                     youtube_fetch_progress_callback, st->status,
                                                      get_ytdlp_cmd(st), yt_cookie_args);
                 if (fetched <= 0) {
-                    snprintf(status, STATUS_LEN, "Failed to fetch playlist");
+                    snprintf(st->status, STATUS_LEN, "Failed to fetch playlist");
                     break;
                 }
 
@@ -4827,14 +4838,14 @@ static void handle_playlists_key(AppState *st, int ch, char *status, int page_si
                 while (1) {
                     get_string_input(mode, sizeof(mode), "Mode (s)tream or (d)ownload: ");
                     if (mode[0] == 's' || mode[0] == 'S' || mode[0] == 'd' || mode[0] == 'D') break;
-                    snprintf(status, STATUS_LEN, "Invalid mode. Choose 's' or 'd'");
-                    draw_ui(st, status);
+                    snprintf(st->status, STATUS_LEN, "Invalid mode. Choose 's' or 'd'");
+                    draw_ui(st);
                 }
                 bool stream_only = (mode[0] == 's' || mode[0] == 'S');
 
                 int idx = create_playlist(st, playlist_name, true);
                 if (idx < 0) {
-                    snprintf(status, STATUS_LEN, "Failed to create playlist");
+                    snprintf(st->status, STATUS_LEN, "Failed to create playlist");
                     for (int i = 0; i < fetched; i++) {
                         free(temp_songs[i].title);
                         free(temp_songs[i].video_id);
@@ -4857,9 +4868,9 @@ static void handle_playlists_key(AppState *st, int ch, char *status, int page_si
                         add_to_download_queue(st, pl->items[i].video_id, pl->items[i].title, pl->name);
                     }
                 }
-                status[0] = '\0';
+                st->status[0] = '\0';
             } else {
-                snprintf(status, STATUS_LEN, "Cancelled");
+                snprintf(st->status, STATUS_LEN, "Cancelled");
             }
             break;
         }
@@ -4868,7 +4879,7 @@ static void handle_playlists_key(AppState *st, int ch, char *status, int page_si
         case 'd':
             if (st->playlist_count > 0) {
                 if (!st->ffmpeg_available) {
-                    snprintf(status, STATUS_LEN,
+                    snprintf(st->status, STATUS_LEN,
                              "ffmpeg not found - required for downloads");
                     break;
                 }
@@ -4896,12 +4907,12 @@ static void handle_playlists_key(AppState *st, int ch, char *status, int page_si
                 }
 
                 if (added > 0) {
-                    snprintf(status, STATUS_LEN, "Queued %d songs (%d already downloaded)",
+                    snprintf(st->status, STATUS_LEN, "Queued %d songs (%d already downloaded)",
                              added, skipped);
                 } else if (skipped > 0) {
-                    snprintf(status, STATUS_LEN, "All %d songs already downloaded", skipped);
+                    snprintf(st->status, STATUS_LEN, "All %d songs already downloaded", skipped);
                 } else {
-                    snprintf(status, STATUS_LEN, "Playlist is empty");
+                    snprintf(st->status, STATUS_LEN, "Playlist is empty");
                 }
             }
             break;
@@ -4909,7 +4920,9 @@ static void handle_playlists_key(AppState *st, int ch, char *status, int page_si
 }
 
 // Handle a key in the songs inside a playlist
-static void handle_playlist_songs_key(AppState *st, int ch, char *status, int page_size) {
+static void handle_playlist_songs_key(AppState *st, int ch) {
+    int page_size = list_page_size(getmaxy(stdscr));
+
     Playlist *pl = NULL;
     if (st->current_playlist_idx >= 0 && st->current_playlist_idx < st->playlist_count) {
         pl = &st->playlists[st->current_playlist_idx];
@@ -4947,7 +4960,7 @@ static void handle_playlist_songs_key(AppState *st, int ch, char *status, int pa
         case KEY_ENTER:
             if (pl && pl->count > 0) {
                 play_playlist_song(st, st->current_playlist_idx, st->playlist_song_selected);
-                snprintf(status, STATUS_LEN, "Playing: %s",
+                snprintf(st->status, STATUS_LEN, "Playing: %s",
                          pl->items[st->playlist_song_selected].title ?
                          pl->items[st->playlist_song_selected].title : "?");
             }
@@ -4957,21 +4970,21 @@ static void handle_playlist_songs_key(AppState *st, int ch, char *status, int pa
         case 'd':
             if (pl && pl->count > 0) {
                 if (!st->ffmpeg_available) {
-                    snprintf(status, STATUS_LEN,
+                    snprintf(st->status, STATUS_LEN,
                              "ffmpeg not found - required for downloads");
                     break;
                 }
                 Song *song = &pl->items[st->playlist_song_selected];
                 int result = add_to_download_queue(st, song->video_id, song->title, pl->name);
                 if (result > 0) {
-                    snprintf(status, STATUS_LEN, "Queued: %s", song->title);
+                    snprintf(st->status, STATUS_LEN, "Queued: %s", song->title);
                 } else if (result == 0) {
-                    snprintf(status, STATUS_LEN, "Already downloaded or queued");
+                    snprintf(st->status, STATUS_LEN, "Already downloaded or queued");
                 } else {
-                    snprintf(status, STATUS_LEN, "Failed to queue download");
+                    snprintf(st->status, STATUS_LEN, "Failed to queue download");
                 }
             } else {
-                snprintf(status, STATUS_LEN, "No song selected");
+                snprintf(st->status, STATUS_LEN, "No song selected");
             }
             break;
 
@@ -4992,12 +5005,12 @@ static void handle_playlist_songs_key(AppState *st, int ch, char *status, int pa
                 snprintf(title_buf, sizeof(title_buf), "%s", title ? title : "?");
                 if (remove_song_from_playlist(st, st->current_playlist_idx,
                                              st->playlist_song_selected)) {
-                    snprintf(status, STATUS_LEN, "Removed: %s", title_buf);
+                    snprintf(st->status, STATUS_LEN, "Removed: %s", title_buf);
                     if (st->playlist_song_selected >= pl->count && pl->count > 0) {
                         st->playlist_song_selected = pl->count - 1;
                     }
                 } else {
-                    snprintf(status, STATUS_LEN, "Failed to remove");
+                    snprintf(st->status, STATUS_LEN, "Failed to remove");
                 }
             }
             break;
@@ -5005,7 +5018,7 @@ static void handle_playlist_songs_key(AppState *st, int ch, char *status, int pa
         case 'D':
             if (pl && pl->is_youtube_playlist && pl->count > 0) {
                 if (!st->ffmpeg_available) {
-                    snprintf(status, STATUS_LEN,
+                    snprintf(st->status, STATUS_LEN,
                              "ffmpeg not found - required for downloads");
                     break;
                 }
@@ -5016,17 +5029,17 @@ static void handle_playlist_songs_key(AppState *st, int ch, char *status, int pa
                     if (result > 0) added++;
                 }
                 if (added > 0) {
-                    snprintf(status, STATUS_LEN, "Queued %d songs", added);
+                    snprintf(st->status, STATUS_LEN, "Queued %d songs", added);
                 } else {
-                    snprintf(status, STATUS_LEN, "All songs already queued or downloaded");
+                    snprintf(st->status, STATUS_LEN, "All songs already queued or downloaded");
                 }
             }
             break;
 
         case 'u': // Sync YouTube playlist
             if (pl && pl->is_youtube_playlist) {
-                snprintf(status, STATUS_LEN, "Syncing playlist...");
-                draw_ui(st, status);
+                snprintf(st->status, STATUS_LEN, "Syncing playlist...");
+                draw_ui(st);
 
                 char fetch_url[512] = {0};
                 int len = 0;
@@ -5043,7 +5056,7 @@ static void handle_playlist_songs_key(AppState *st, int ch, char *status, int pa
                     len = get_string_input(fetch_url, sizeof(fetch_url),
                         "YouTube playlist URL to sync: ");
                     if (len == 0) {
-                        snprintf(status, STATUS_LEN, "Sync cancelled");
+                        snprintf(st->status, STATUS_LEN, "Sync cancelled");
                         break;
                     }
                 }
@@ -5055,7 +5068,7 @@ static void handle_playlist_songs_key(AppState *st, int ch, char *status, int pa
                     build_cookie_args(st, yt_cookie_args, sizeof(yt_cookie_args));
                     int fetched = fetch_youtube_playlist(fetch_url, temp_songs, MAX_PLAYLIST_ITEMS,
                                                          fetched_title, sizeof(fetched_title),
-                                                         youtube_fetch_progress_callback, status,
+                                                         youtube_fetch_progress_callback, st->status,
                                                          get_ytdlp_cmd(st), yt_cookie_args);
 
                     if (fetched > 0) {
@@ -5101,21 +5114,21 @@ static void handle_playlist_songs_key(AppState *st, int ch, char *status, int pa
 
                         if (new_count > 0) {
                             save_playlist(st, st->current_playlist_idx);
-                            snprintf(status, STATUS_LEN, "Added %d new songs", new_count);
+                            snprintf(st->status, STATUS_LEN, "Added %d new songs", new_count);
                         } else {
                             if (!use_stored_url) save_playlist(st, st->current_playlist_idx);
-                            snprintf(status, STATUS_LEN, "Playlist is up to date");
+                            snprintf(st->status, STATUS_LEN, "Playlist is up to date");
                         }
                     } else {
-                        snprintf(status, STATUS_LEN, "Failed to fetch playlist");
+                        snprintf(st->status, STATUS_LEN, "Failed to fetch playlist");
                     }
                 } else if (len > 0) {
-                    snprintf(status, STATUS_LEN, "Invalid YouTube playlist URL");
+                    snprintf(st->status, STATUS_LEN, "Invalid YouTube playlist URL");
                 } else {
-                    snprintf(status, STATUS_LEN, "Sync cancelled");
+                    snprintf(st->status, STATUS_LEN, "Sync cancelled");
                 }
             } else {
-                snprintf(status, STATUS_LEN, "Not a YouTube playlist");
+                snprintf(st->status, STATUS_LEN, "Not a YouTube playlist");
             }
             break;
 
@@ -5126,7 +5139,7 @@ static void handle_playlist_songs_key(AppState *st, int ch, char *status, int pa
                 st->playing_from_playlist = false;
                 st->playing_playlist_idx = -1;
                 st->paused = false;
-                snprintf(status, STATUS_LEN, "Playback stopped");
+                snprintf(st->status, STATUS_LEN, "Playback stopped");
             }
             break;
 
@@ -5141,9 +5154,9 @@ static void handle_playlist_songs_key(AppState *st, int ch, char *status, int pa
                     free(song->title);
                     song->title = strdup(new_title);
                     save_playlist(st, st->current_playlist_idx);
-                    snprintf(status, STATUS_LEN, "Renamed to: %s", new_title);
+                    snprintf(st->status, STATUS_LEN, "Renamed to: %s", new_title);
                 } else if (len == 0) {
-                    snprintf(status, STATUS_LEN, "Rename cancelled");
+                    snprintf(st->status, STATUS_LEN, "Rename cancelled");
                 }
             }
             break;
@@ -5151,7 +5164,9 @@ static void handle_playlist_songs_key(AppState *st, int ch, char *status, int pa
 }
 
 // Handle a key in the add-to-playlist picker
-static void handle_add_to_playlist_key(AppState *st, int ch, char *status, int page_size) {
+static void handle_add_to_playlist_key(AppState *st, int ch) {
+    int page_size = list_page_size(getmaxy(stdscr));
+
     switch (ch) {
         case KEY_UP:
         case 'k':
@@ -5195,17 +5210,17 @@ static void handle_add_to_playlist_key(AppState *st, int ch, char *status, int p
                 }
                 // rlen == 0 means Escape was pressed, cancel the add
                 if (rlen == 0) {
-                    snprintf(status, STATUS_LEN, "Cancelled");
+                    snprintf(st->status, STATUS_LEN, "Cancelled");
                     st->song_to_add = NULL;
                     st->view = VIEW_SEARCH;
                     break;
                 }
                 if (add_song_to_playlist(st, st->add_to_playlist_selected, st->song_to_add)) {
-                    snprintf(status, STATUS_LEN, "Added: %s to: %s",
+                    snprintf(st->status, STATUS_LEN, "Added: %s to: %s",
                              st->song_to_add->title ? st->song_to_add->title : "?",
                              st->playlists[st->add_to_playlist_selected].name);
                 } else {
-                    snprintf(status, STATUS_LEN, "Already in playlist or failed");
+                    snprintf(st->status, STATUS_LEN, "Already in playlist or failed");
                 }
                 st->song_to_add = NULL;
                 st->view = VIEW_SEARCH;
@@ -5220,19 +5235,19 @@ static void handle_add_to_playlist_key(AppState *st, int ch, char *status, int p
                 if (idx >= 0) {
                     if (st->song_to_add) {
                         add_song_to_playlist(st, idx, st->song_to_add);
-                        snprintf(status, STATUS_LEN, "Created '%s' and added song", name);
+                        snprintf(st->status, STATUS_LEN, "Created '%s' and added song", name);
                         st->song_to_add = NULL;
                         st->view = VIEW_SEARCH;
                     } else {
-                        snprintf(status, STATUS_LEN, "Created: %s", name);
+                        snprintf(st->status, STATUS_LEN, "Created: %s", name);
                     }
                 } else if (idx == -2) {
-                    snprintf(status, STATUS_LEN, "Playlist already exists: %s", name);
+                    snprintf(st->status, STATUS_LEN, "Playlist already exists: %s", name);
                 } else {
-                    snprintf(status, STATUS_LEN, "Failed to create playlist");
+                    snprintf(st->status, STATUS_LEN, "Failed to create playlist");
                 }
             } else {
-                snprintf(status, STATUS_LEN, "Cancelled");
+                snprintf(st->status, STATUS_LEN, "Cancelled");
             }
             break;
         }
@@ -5240,7 +5255,7 @@ static void handle_add_to_playlist_key(AppState *st, int ch, char *status, int p
 }
 
 // Handle a key in the settings view
-static void handle_settings_key(AppState *st, int ch, char *status) {
+static void handle_settings_key(AppState *st, int ch) {
     switch (ch) {
         case KEY_UP:
         case 'k':
@@ -5261,7 +5276,7 @@ static void handle_settings_key(AppState *st, int ch, char *status) {
                         sizeof(st->settings_edit_buffer) - 1);
                 st->settings_edit_buffer[sizeof(st->settings_edit_buffer) - 1] = '\0';
                 st->settings_edit_pos = strlen(st->settings_edit_buffer);
-                snprintf(status, STATUS_LEN, "Editing download path...");
+                snprintf(st->status, STATUS_LEN, "Editing download path...");
             } else if (st->settings_selected == 1) {
                 // Seek step - prompt for new value
                 char step_input[16] = {0};
@@ -5271,29 +5286,29 @@ static void handle_settings_key(AppState *st, int ch, char *status) {
                     if (new_step >= 1 && new_step <= 300) {
                         st->config.seek_step = new_step;
                         save_config(st);
-                        snprintf(status, STATUS_LEN, "Seek step set to %d seconds", new_step);
+                        snprintf(st->status, STATUS_LEN, "Seek step set to %d seconds", new_step);
                     } else {
-                        snprintf(status, STATUS_LEN, "Invalid value (must be 1-300)");
+                        snprintf(st->status, STATUS_LEN, "Invalid value (must be 1-300)");
                     }
                 }
             } else if (st->settings_selected == 2) {
                 // Remember session - toggle
                 st->config.remember_session = !st->config.remember_session;
                 save_config(st);
-                snprintf(status, STATUS_LEN, "Remember session: %s",
+                snprintf(st->status, STATUS_LEN, "Remember session: %s",
                          st->config.remember_session ? "ON" : "OFF");
             } else if (st->settings_selected == 3) {
                 // Shuffle mode - toggle
                 st->shuffle_mode = !st->shuffle_mode;
                 free_shuffle_order(st);
                 save_config(st);
-                snprintf(status, STATUS_LEN, "Shuffle: %s",
+                snprintf(st->status, STATUS_LEN, "Shuffle: %s",
                          st->shuffle_mode ? "ON" : "OFF");
             } else if (st->settings_selected == 4) {
                 // Repeat mode - cycle
                 st->repeat_mode = next_repeat_mode(st->repeat_mode);
                 save_config(st);
-                snprintf(status, STATUS_LEN, "Repeat: %s",
+                snprintf(st->status, STATUS_LEN, "Repeat: %s",
                          repeat_mode_label(st->repeat_mode));
             } else if (st->settings_selected == 5) {
                 // Search results - prompt for new value
@@ -5304,9 +5319,9 @@ static void handle_settings_key(AppState *st, int ch, char *status) {
                     if (new_val >= 10 && new_val <= 150) {
                         st->config.max_results = new_val;
                         save_config(st);
-                        snprintf(status, STATUS_LEN, "Search results set to %d", new_val);
+                        snprintf(st->status, STATUS_LEN, "Search results set to %d", new_val);
                     } else {
-                        snprintf(status, STATUS_LEN, "Invalid value (must be 10-150)");
+                        snprintf(st->status, STATUS_LEN, "Invalid value (must be 10-150)");
                     }
                 }
             } else if (st->settings_selected == 6) {
@@ -5323,11 +5338,11 @@ static void handle_settings_key(AppState *st, int ch, char *status) {
                 const char *lab = "Off";
                 if (st->config.yt_cookies_mode == YT_COOKIES_AUTO) lab = "Auto from browser";
                 else if (st->config.yt_cookies_mode == YT_COOKIES_MANUAL) lab = "Manual file";
-                snprintf(status, STATUS_LEN, "Cookies mode: %s", lab);
+                snprintf(st->status, STATUS_LEN, "Cookies mode: %s", lab);
             } else if (st->settings_selected == 7) {
                 // Browser - cycle through supported list
                 if (st->config.yt_cookies_mode != YT_COOKIES_AUTO) {
-                    snprintf(status, STATUS_LEN, "Set Cookies Mode to 'Auto from browser' first");
+                    snprintf(st->status, STATUS_LEN, "Set Cookies Mode to 'Auto from browser' first");
                 } else {
                     static const char *browsers[] = {
                         "firefox", "chrome", "chromium", "brave",
@@ -5347,28 +5362,28 @@ static void handle_settings_key(AppState *st, int ch, char *status) {
                              "%s", browsers[idx]);
                     save_config(st);
                     if (strcmp(browsers[idx], "safari") == 0) {
-                        snprintf(status, STATUS_LEN,
+                        snprintf(st->status, STATUS_LEN,
                                  "Browser: safari (may need 'Full Disk Access' for terminal in macOS Settings)");
                     } else {
-                        snprintf(status, STATUS_LEN, "Browser: %s", browsers[idx]);
+                        snprintf(st->status, STATUS_LEN, "Browser: %s", browsers[idx]);
                     }
                 }
             } else if (st->settings_selected == 8) {
                 // Cookies file path - text input
                 if (st->config.yt_cookies_mode != YT_COOKIES_MANUAL) {
-                    snprintf(status, STATUS_LEN, "Set Cookies Mode to 'Manual file' first");
+                    snprintf(st->status, STATUS_LEN, "Set Cookies Mode to 'Manual file' first");
                 } else {
                     st->settings_editing = true;
                     strncpy(st->settings_edit_buffer, st->config.yt_cookies_file,
                             sizeof(st->settings_edit_buffer) - 1);
                     st->settings_edit_buffer[sizeof(st->settings_edit_buffer) - 1] = '\0';
                     st->settings_edit_pos = strlen(st->settings_edit_buffer);
-                    snprintf(status, STATUS_LEN, "Editing cookies file path...");
+                    snprintf(st->status, STATUS_LEN, "Editing cookies file path...");
                 }
             } else if (st->settings_selected == 9) {
                 // Test cookies - run a real fetch
-                snprintf(status, STATUS_LEN, "Testing yt-dlp with current cookies config...");
-                draw_ui(st, status);
+                snprintf(st->status, STATUS_LEN, "Testing yt-dlp with current cookies config...");
+                draw_ui(st);
 
                 char cookie_args[1200];
                 build_cookie_args(st, cookie_args, sizeof(cookie_args));
@@ -5391,7 +5406,7 @@ static void handle_settings_key(AppState *st, int ch, char *status) {
                 FILE *fp = sb_exec_popen(test_argv, 1);
                 sb_free_cookie_args(test_argv, cookie_from, cookie_to);
                 if (!fp) {
-                    snprintf(status, STATUS_LEN, "Test failed: cannot run yt-dlp");
+                    snprintf(st->status, STATUS_LEN, "Test failed: cannot run yt-dlp");
                     sb_log("[COOKIES TEST] sb_exec_popen failed: %s", strerror(errno));
                 } else {
                     // Read output (could be a long JSON)
@@ -5468,16 +5483,16 @@ static void handle_settings_key(AppState *st, int ch, char *status) {
                                 }
                             }
                         }
-                        snprintf(status, STATUS_LEN, "OK - fetched: %s", title);
+                        snprintf(st->status, STATUS_LEN, "OK - fetched: %s", title);
                     } else if (full_out && strstr(full_out, "Sign in to confirm")) {
-                        snprintf(status, STATUS_LEN,
+                        snprintf(st->status, STATUS_LEN,
                                  "FAIL - YouTube bot check. Configure cookies above. Full log: ~/.shellbeats/shellbeats.log");
                     } else if (first_err[0]) {
-                        snprintf(status, STATUS_LEN,
+                        snprintf(st->status, STATUS_LEN,
                                  "FAIL - %s | full log: ~/.shellbeats/shellbeats.log",
                                  first_err);
                     } else {
-                        snprintf(status, STATUS_LEN,
+                        snprintf(st->status, STATUS_LEN,
                                  "FAIL - exit=%d. Check log: ~/.shellbeats/shellbeats.log",
                                  rc);
                     }
@@ -5487,15 +5502,28 @@ static void handle_settings_key(AppState *st, int ch, char *status) {
                 // Copy guide link to clipboard
                 const char *link = "https://surikata.app/g/9fa4af84829f";
                 if (copy_to_clipboard(link)) {
-                    snprintf(status, STATUS_LEN, "Guide link copied to clipboard");
+                    snprintf(st->status, STATUS_LEN, "Guide link copied to clipboard");
                 } else {
-                    snprintf(status, STATUS_LEN,
+                    snprintf(st->status, STATUS_LEN,
                              "No clipboard helper found. Copy this URL manually: %s", link);
                 }
             }
             break;
     }
 }
+
+// View-specific key handlers, indexed by ViewMode. NULL means the view has none.
+typedef void (*ViewKeyHandler)(AppState *st, int ch);
+static const ViewKeyHandler view_key_handlers[] = {
+    [VIEW_SEARCH]          = handle_search_key,
+    [VIEW_PLAYLISTS]       = handle_playlists_key,
+    [VIEW_PLAYLIST_SONGS]  = handle_playlist_songs_key,
+    [VIEW_ADD_TO_PLAYLIST] = handle_add_to_playlist_key,
+    [VIEW_SETTINGS]        = handle_settings_key,
+    [VIEW_ABOUT]           = NULL,  // closes on any key, handled by the 'i' global key
+};
+_Static_assert(sizeof(view_key_handlers) / sizeof(view_key_handlers[0]) == VIEW_COUNT,
+               "view_key_handlers needs an entry for every ViewMode");
 
 // Save the current search or playlist position for remember_session
 static void save_session(AppState *st) {
@@ -5585,27 +5613,25 @@ int main(int argc, char *argv[]) {
     // Set timeout for non-blocking input (for poll-based event checking)
     timeout(100); // 100ms timeout
 
-    char status[STATUS_LEN] = "";
-
-    if (!check_dependencies(&st, status, sizeof(status))) {
-        draw_ui(&st, status);
+    if (!check_dependencies(&st, st.status, STATUS_LEN)) {
+        draw_ui(&st);
         timeout(-1);
         getch();
         endwin();
-        fprintf(stderr, "%s\n", status);
+        fprintf(stderr, "%s\n", st.status);
         return 1;
     }
 
-    restore_session(&st, status);
+    restore_session(&st);
 
     // Surface the ffmpeg warning at first paint, overriding the welcome line.
     // The user can still trigger normal status messages with any keypress.
     if (!st.ffmpeg_available) {
-        snprintf(status, sizeof(status),
+        snprintf(st.status, STATUS_LEN,
                  "ffmpeg not found - required for downloads");
     }
 
-    draw_ui(&st, status);
+    draw_ui(&st);
 
     while (true) {
         // NEW: Update spinner for download animation
@@ -5615,25 +5641,20 @@ int main(int argc, char *argv[]) {
             st.last_spinner_update = now;
         }
 
-        check_track_end(&st, now, status);
+        check_track_end(&st, now);
 
         int ch = getch();
 
         if (ch == ERR) {
             // Timeout - redraw UI to update spinner and download status
-            draw_ui(&st, status);
+            draw_ui(&st);
             continue;
         }
 
-        int rows, cols;
-        getmaxyx(stdscr, rows, cols);
-        (void)cols;
-        int page_size = list_page_size(rows);
-
         // NEW: Handle settings editing mode separately
         if (st.view == VIEW_SETTINGS && st.settings_editing) {
-            handle_settings_edit_key(&st, ch, status);
-            draw_ui(&st, status);
+            handle_settings_edit_key(&st, ch);
+            draw_ui(&st);
             continue;
         }
 
@@ -5643,35 +5664,12 @@ int main(int argc, char *argv[]) {
         }
 
         // Global keys, then view-specific keys
-        handle_global_key(&st, ch, status);
+        handle_global_key(&st, ch);
 
-        switch (st.view) {
-            case VIEW_SEARCH:
-                handle_search_key(&st, ch, status, page_size);
-                break;
+        ViewKeyHandler handler = view_key_handlers[st.view];
+        if (handler) handler(&st, ch);
 
-            case VIEW_PLAYLISTS:
-                handle_playlists_key(&st, ch, status, page_size);
-                break;
-
-            case VIEW_PLAYLIST_SONGS:
-                handle_playlist_songs_key(&st, ch, status, page_size);
-                break;
-
-            case VIEW_ADD_TO_PLAYLIST:
-                handle_add_to_playlist_key(&st, ch, status, page_size);
-                break;
-
-            case VIEW_SETTINGS:
-                handle_settings_key(&st, ch, status);
-                break;
-
-            case VIEW_ABOUT:
-                // About view doesn't handle any keys (just closes on any key)
-                break;
-        }
-
-        draw_ui(&st, status);
+        draw_ui(&st);
     }
 
     // Save session state before exit
