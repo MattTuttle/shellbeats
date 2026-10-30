@@ -44,6 +44,7 @@
 #define YTDLP_BIN_DIR "bin"
 #define YTDLP_BINARY "yt-dlp"
 #define YTDLP_VERSION_FILE "yt-dlp.version"
+#define KEY_CTRL(c) ((c) & 0x1f)
 
 // ============================================================================
 // Data Structures
@@ -134,30 +135,30 @@ typedef struct {
     int search_selected;
     int search_scroll;
     char query[256];
-    
+
     // Playlists
     Playlist playlists[MAX_PLAYLISTS];
     int playlist_count;
     int playlist_selected;
     int playlist_scroll;
-    
+
     // Current playlist view
     int current_playlist_idx;
     int playlist_song_selected;
     int playlist_song_scroll;
-    
+
     // Playback state
     int playing_index;
     bool playing_from_playlist;
     int playing_playlist_idx;
     bool paused;
-    
+
     // UI state
     ViewMode view;
     int add_to_playlist_selected;
     int add_to_playlist_scroll;
     Song *song_to_add;
-    
+
     // NEW: Settings UI state
     int settings_selected;
     bool settings_editing;
@@ -166,10 +167,10 @@ typedef struct {
 
     // YouTube bot-check detection (set by yt-dlp invocations)
     bool yt_blocked;
-    
+
     // Playback timing (to ignore false end events during loading)
     time_t playback_started;
-    
+
     // Config paths
     char config_dir[16384];      // Significantly increased buffer size
     char playlists_dir[16384];   // Significantly increased buffer size
@@ -311,14 +312,14 @@ static bool mkdir_p(const char *path) {
     char tmp[4096]; // Increased buffer size
     char *p = NULL;
     size_t len;
-    
+
     snprintf(tmp, sizeof(tmp), "%s", path);
     len = strlen(tmp);
-    
+
     if (tmp[len - 1] == '/') {
         tmp[len - 1] = 0;
     }
-    
+
     for (p = tmp + 1; *p; p++) {
         if (*p == '/') {
             *p = 0;
@@ -330,13 +331,13 @@ static bool mkdir_p(const char *path) {
             *p = '/';
         }
     }
-    
+
     if (!dir_exists(tmp)) {
         if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
             return false;
         }
     }
-    
+
     return true;
 }
 
@@ -364,15 +365,15 @@ static void sanitize_title_for_filename(const char *title, const char *video_id,
         if (out && out_size > 0) out[0] = '\0';
         return;
     }
-    
+
     char sanitized[256] = {0};
     size_t j = 0;
-    
+
     for (size_t i = 0; title[i] && j < sizeof(sanitized) - 1; i++) {
         char c = title[i];
-        
+
         // Replace problematic characters
-        if (c == '/' || c == '\\' || c == ':' || c == '*' || 
+        if (c == '/' || c == '\\' || c == ':' || c == '*' ||
             c == '?' || c == '"' || c == '<' || c == '>' || c == '|') {
             continue;
         } else if (c == ' ' || c == '\'' || c == '`') {
@@ -384,23 +385,23 @@ static void sanitize_title_for_filename(const char *title, const char *video_id,
             sanitized[j++] = c;
         }
     }
-    
+
     // Remove trailing underscores
     while (j > 0 && sanitized[j-1] == '_') {
         j--;
     }
     sanitized[j] = '\0';
-    
+
     // If empty after sanitization, use "download"
     if (sanitized[0] == '\0') {
         strcpy(sanitized, "download");
     }
-    
+
     // Truncate if too long (leave room for _[video_id].mp3)
     if (strlen(sanitized) > 180) {
         sanitized[180] = '\0';
     }
-    
+
     // Build final filename: Title_[video_id].mp3
     snprintf(out, out_size, "%s_[%s].mp3", sanitized, video_id);
 }
@@ -409,10 +410,10 @@ static void sanitize_title_for_filename(const char *title, const char *video_id,
 static bool file_exists_for_video(const char *dir_path, const char *video_id) {
     DIR *dir = opendir(dir_path);
     if (!dir) return false;
-    
+
     char pattern[64];
     snprintf(pattern, sizeof(pattern), "[%s].mp3", video_id);
-    
+
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         if (strstr(entry->d_name, pattern) != NULL) {
@@ -420,7 +421,7 @@ static bool file_exists_for_video(const char *dir_path, const char *video_id) {
             return true;
         }
     }
-    
+
     closedir(dir);
     return false;
 }
@@ -505,12 +506,12 @@ static bool delete_directory_recursive(const char *path) {
 
 static char *json_escape_string(const char *s) {
     if (!s) return strdup("");
-    
+
     size_t len = strlen(s);
     size_t alloc = len * 2 + 1;
     char *out = malloc(alloc);
     if (!out) return NULL;
-    
+
     size_t j = 0;
     for (size_t i = 0; i < len && j < alloc - 2; i++) {
         char c = s[i];
@@ -539,26 +540,26 @@ static char *json_escape_string(const char *s) {
 static char *json_get_string(const char *json, const char *key) {
     char pattern[256];
     snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    
+
     const char *p = strstr(json, pattern);
     if (!p) return NULL;
-    
+
     p += strlen(pattern);
     while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
-    
+
     if (*p != '"') return NULL;
     p++;
-    
+
     const char *start = p;
     while (*p && *p != '"') {
         if (*p == '\\' && *(p+1)) p++;
         p++;
     }
-    
+
     size_t len = p - start;
     char *result = malloc(len + 1);
     if (!result) return NULL;
-    
+
     // Unescape
     size_t j = 0;
     for (size_t i = 0; i < len; i++) {
@@ -640,7 +641,7 @@ static bool init_config_dirs(AppState *st) {
     if (!dir_exists(st->ytdlp_bin_dir)) {
         mkdir(st->ytdlp_bin_dir, 0755);  // best-effort, app works without it
     }
-    
+
     // Create empty playlists index if not exists
     if (!file_exists(st->playlists_index)) {
         FILE *f = fopen(st->playlists_index, "w");
@@ -649,7 +650,7 @@ static bool init_config_dirs(AppState *st) {
             fclose(f);
         }
     }
-    
+
     return true;
 }
 
@@ -1466,60 +1467,60 @@ static void save_download_queue(AppState *st) {
 static void load_download_queue(AppState *st) {
     FILE *f = fopen(st->download_queue_file, "r");
     if (!f) return;
-    
+
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
     fseek(f, 0, SEEK_SET);
-    
+
     if (fsize <= 0 || fsize > 1024 * 1024) {
         fclose(f);
         return;
     }
-    
+
     char *content = malloc(fsize + 1);
     if (!content) {
         fclose(f);
         return;
     }
-    
+
     size_t read_size = fread(content, 1, fsize, f);
     content[read_size] = '\0';
     fclose(f);
-    
+
     const char *p = strstr(content, "\"tasks\"");
     if (!p) {
         free(content);
         return;
     }
-    
+
     p = strchr(p, '[');
     if (!p) {
         free(content);
         return;
     }
-    
+
     pthread_mutex_lock(&st->download_queue.mutex);
-    
+
     while (st->download_queue.count < MAX_DOWNLOAD_QUEUE) {
         const char *obj_start = strchr(p, '{');
         if (!obj_start) break;
-        
+
         const char *obj_end = strchr(obj_start, '}');
         if (!obj_end) break;
-        
+
         size_t obj_len = obj_end - obj_start + 1;
         char *obj = malloc(obj_len + 1);
         if (!obj) break;
-        
+
         memcpy(obj, obj_start, obj_len);
         obj[obj_len] = '\0';
-        
+
         char *video_id = json_get_string(obj, "video_id");
         char *title = json_get_string(obj, "title");
         char *filename = json_get_string(obj, "filename");
         char *playlist = json_get_string(obj, "playlist");
         char *status_str = json_get_string(obj, "status");
-        
+
         if (is_valid_video_id(video_id)) {
             DownloadTask *task = &st->download_queue.tasks[st->download_queue.count];
 
@@ -1527,27 +1528,27 @@ static void load_download_queue(AppState *st) {
             strncpy(task->title, title ? title : "", sizeof(task->title) - 1);
             strncpy(task->sanitized_filename, filename ? filename : "", sizeof(task->sanitized_filename) - 1);
             strncpy(task->playlist_name, playlist ? playlist : "", sizeof(task->playlist_name) - 1);
-            
+
             if (status_str && strcmp(status_str, "failed") == 0) {
                 task->status = DOWNLOAD_FAILED;
                 st->download_queue.failed++;
             } else {
                 task->status = DOWNLOAD_PENDING;
             }
-            
+
             st->download_queue.count++;
         }
-        
+
         free(video_id);
         free(title);
         free(filename);
         free(playlist);
         free(status_str);
         free(obj);
-        
+
         p = obj_end + 1;
     }
-    
+
     pthread_mutex_unlock(&st->download_queue.mutex);
     free(content);
 }
@@ -1558,10 +1559,10 @@ static void load_download_queue(AppState *st) {
 
 static void *download_thread_func(void *arg) {
     AppState *st = (AppState *)arg;
-    
+
     while (!st->download_queue.should_stop) {
         pthread_mutex_lock(&st->download_queue.mutex);
-        
+
         // Find next pending task
         int task_idx = -1;
         for (int i = 0; i < st->download_queue.count; i++) {
@@ -1573,7 +1574,7 @@ static void *download_thread_func(void *arg) {
                 break;
             }
         }
-        
+
         if (task_idx < 0) {
             // No pending tasks
             st->download_queue.active = false;
@@ -1582,7 +1583,7 @@ static void *download_thread_func(void *arg) {
             usleep(500 * 1000);  // Sleep 500ms
             continue;
         }
-        
+
         // Copy task data while holding lock
         DownloadTask task;
         memcpy(&task, &st->download_queue.tasks[task_idx], sizeof(DownloadTask));
@@ -1595,7 +1596,7 @@ static void *download_thread_func(void *arg) {
         // Build destination path
         char dest_dir[2048]; // Increased buffer size
         char dest_path[2560]; // Increased buffer size
-        
+
         if (task.playlist_name[0]) {
             char safe_name[512];
             playlist_dir_name(task.playlist_name, safe_name, sizeof(safe_name));
@@ -1604,12 +1605,12 @@ static void *download_thread_func(void *arg) {
         } else {
             snprintf(dest_dir, sizeof(dest_dir), "%s", st->config.download_path);
         }
-        
+
         // Create directory if needed
         mkdir_p(dest_dir);
-        
+
         snprintf(dest_path, sizeof(dest_path), "%s/%s", dest_dir, task.sanitized_filename);
-        
+
         // Check if file already exists (double-check)
         if (file_exists(dest_path)) {
             pthread_mutex_lock(&st->download_queue.mutex);
@@ -1619,7 +1620,7 @@ static void *download_thread_func(void *arg) {
             pthread_mutex_unlock(&st->download_queue.mutex);
             continue;
         }
-        
+
         // Build yt-dlp argv (shell-free execution; video_id comes from JSON
         // on disk and must NEVER be interpolated into a shell command).
         char cookie_args[1200];
@@ -1667,9 +1668,9 @@ static void *download_thread_func(void *arg) {
                    result, line_count, file_exists(dest_path) ? "yes" : "no");
         }
         sb_free_cookie_args(argv, cookie_from, cookie_to);
-        
+
         pthread_mutex_lock(&st->download_queue.mutex);
-        
+
         if (result == 0 && file_exists(dest_path)) {
             st->download_queue.tasks[task_idx].status = DOWNLOAD_COMPLETED;
             st->download_queue.completed++;
@@ -1677,19 +1678,19 @@ static void *download_thread_func(void *arg) {
             st->download_queue.tasks[task_idx].status = DOWNLOAD_FAILED;
             st->download_queue.failed++;
         }
-        
+
         save_download_queue(st);
         pthread_mutex_unlock(&st->download_queue.mutex);
     }
-    
+
     return NULL;
 }
 
 static void start_download_thread(AppState *st) {
     if (st->download_queue.thread_running) return;
-    
+
     st->download_queue.should_stop = false;
-    
+
     if (pthread_create(&st->download_queue.thread, NULL, download_thread_func, st) == 0) {
         st->download_queue.thread_running = true;
     }
@@ -1697,7 +1698,7 @@ static void start_download_thread(AppState *st) {
 
 static void stop_download_thread(AppState *st) {
     if (!st->download_queue.thread_running) return;
-    
+
     st->download_queue.should_stop = true;
     pthread_join(st->download_queue.thread, NULL);
     st->download_queue.thread_running = false;
@@ -1736,9 +1737,9 @@ static int add_to_download_queue(AppState *st, const char *video_id, const char 
     if (file_exists_for_video(dest_dir, video_id)) {
         return 0;  // Already exists
     }
-    
+
     pthread_mutex_lock(&st->download_queue.mutex);
-    
+
     // Check if already in queue
     for (int i = 0; i < st->download_queue.count; i++) {
         if (strcmp(st->download_queue.tasks[i].video_id, video_id) == 0 &&
@@ -1747,42 +1748,42 @@ static int add_to_download_queue(AppState *st, const char *video_id, const char 
             return 0;  // Already queued
         }
     }
-    
+
     // Check queue capacity
     if (st->download_queue.count >= MAX_DOWNLOAD_QUEUE) {
         pthread_mutex_unlock(&st->download_queue.mutex);
         return -1;
     }
-    
+
     // Add new task
     DownloadTask *task = &st->download_queue.tasks[st->download_queue.count];
-    
+
     strncpy(task->video_id, video_id, sizeof(task->video_id) - 1);
     task->video_id[sizeof(task->video_id) - 1] = '\0';
-    
+
     strncpy(task->title, title ? title : "Unknown", sizeof(task->title) - 1);
     task->title[sizeof(task->title) - 1] = '\0';
-    
-    sanitize_title_for_filename(title, video_id, task->sanitized_filename, 
+
+    sanitize_title_for_filename(title, video_id, task->sanitized_filename,
                                  sizeof(task->sanitized_filename));
-    
+
     if (playlist_name) {
         strncpy(task->playlist_name, playlist_name, sizeof(task->playlist_name) - 1);
         task->playlist_name[sizeof(task->playlist_name) - 1] = '\0';
     } else {
         task->playlist_name[0] = '\0';
     }
-    
+
     task->status = DOWNLOAD_PENDING;
     st->download_queue.count++;
-    
+
     save_download_queue(st);
-    
+
     pthread_mutex_unlock(&st->download_queue.mutex);
-    
+
     // Start download thread if not running
     start_download_thread(st);
-    
+
     return 1;  // Added to queue
 }
 
@@ -1871,34 +1872,34 @@ static void playlist_dir_name(const char *playlist_name, char *out, size_t out_s
 static void save_playlists_index(AppState *st) {
     FILE *f = fopen(st->playlists_index, "w");
     if (!f) return;
-    
+
     fprintf(f, "{\n  \"playlists\": [\n");
-    
+
     for (int i = 0; i < st->playlist_count; i++) {
         char *escaped_name = json_escape_string(st->playlists[i].name);
         char *escaped_file = json_escape_string(st->playlists[i].filename);
-        
+
         fprintf(f, "    {\"name\": \"%s\", \"filename\": \"%s\"}%s\n",
                 escaped_name ? escaped_name : "",
                 escaped_file ? escaped_file : "",
                 (i < st->playlist_count - 1) ? "," : "");
-        
+
         free(escaped_name);
         free(escaped_file);
     }
-    
+
     fprintf(f, "  ]\n}\n");
     fclose(f);
 }
 
 static void save_playlist(AppState *st, int idx) {
     if (idx < 0 || idx >= st->playlist_count) return;
-    
+
     Playlist *pl = &st->playlists[idx];
-    
+
     char path[4096]; // Increased buffer size
     snprintf(path, sizeof(path), "%s/%s", st->playlists_dir, pl->filename);
-    
+
     FILE *f = fopen(path, "w");
     if (!f) return;
 
@@ -1910,7 +1911,7 @@ static void save_playlist(AppState *st, int idx) {
             escaped_src ? escaped_src : "");
 
     free(escaped_src);
-    
+
     for (int i = 0; i < pl->count; i++) {
         char *escaped_title = json_escape_string(pl->items[i].title);
         char *escaped_id = json_escape_string(pl->items[i].video_id);
@@ -1924,43 +1925,43 @@ static void save_playlist(AppState *st, int idx) {
         free(escaped_title);
         free(escaped_id);
     }
-    
+
     fprintf(f, "  ]\n}\n");
     fclose(f);
 }
 
 static void load_playlist_songs(AppState *st, int idx) {
     if (idx < 0 || idx >= st->playlist_count) return;
-    
+
     Playlist *pl = &st->playlists[idx];
     free_playlist_items(pl);
-    
+
     char path[16384]; // Significantly increased buffer size
     snprintf(path, sizeof(path), "%s/%s", st->playlists_dir, pl->filename);
-    
+
     FILE *f = fopen(path, "r");
     if (!f) return;
-    
+
     // Read entire file
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
     fseek(f, 0, SEEK_SET);
-    
+
     if (fsize <= 0 || fsize > 1024 * 1024) {
         fclose(f);
         return;
     }
-    
+
     char *content = malloc(fsize + 1);
     if (!content) {
         fclose(f);
         return;
     }
-    
+
     size_t read_size = fread(content, 1, fsize, f);
     content[read_size] = '\0';
     fclose(f);
-    
+
     // Parse type
     char *type = json_get_string(content, "type");
     pl->is_youtube_playlist = (type && strcmp(type, "youtube") == 0);
@@ -1991,36 +1992,36 @@ static void load_playlist_songs(AppState *st, int idx) {
             }
         }
     }
-    
+
     // Parse songs array - simple approach
     const char *p = strstr(content, "\"songs\"");
     if (!p) {
         free(content);
         return;
     }
-    
+
     p = strchr(p, '[');
     if (!p) {
         free(content);
         return;
     }
-    
+
     // Find each song object
     while (pl->count < MAX_PLAYLIST_ITEMS) {
         const char *obj_start = strchr(p, '{');
         if (!obj_start) break;
-        
+
         const char *obj_end = strchr(obj_start, '}');
         if (!obj_end) break;
-        
+
         // Extract this object
         size_t obj_len = obj_end - obj_start + 1;
         char *obj = malloc(obj_len + 1);
         if (!obj) break;
-        
+
         memcpy(obj, obj_start, obj_len);
         obj[obj_len] = '\0';
-        
+
         char *title = json_get_string(obj, "title");
         char *video_id = json_get_string(obj, "video_id");
         int duration = json_get_int(obj, "duration", 0);
@@ -2033,76 +2034,76 @@ static void load_playlist_songs(AppState *st, int idx) {
             snprintf(url, sizeof(url), "https://www.youtube.com/watch?v=%s", video_id);
             pl->items[pl->count].url = strdup(url);
             pl->items[pl->count].duration = duration;
-            
+
             pl->count++;
         } else {
             free(title);
             free(video_id);
         }
-        
+
         free(obj);
         p = obj_end + 1;
     }
-    
+
     free(content);
 }
 
 static void load_playlists(AppState *st) {
     free_all_playlists(st);
-    
+
     FILE *f = fopen(st->playlists_index, "r");
     if (!f) return;
-    
+
     // Read entire file
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
     fseek(f, 0, SEEK_SET);
-    
+
     if (fsize <= 0 || fsize > 1024 * 1024) {
         fclose(f);
         return;
     }
-    
+
     char *content = malloc(fsize + 1);
     if (!content) {
         fclose(f);
         return;
     }
-    
+
     size_t read_size = fread(content, 1, fsize, f);
     content[read_size] = '\0';
     fclose(f);
-    
+
     // Parse playlists array
     const char *p = strstr(content, "\"playlists\"");
     if (!p) {
         free(content);
         return;
     }
-    
+
     p = strchr(p, '[');
     if (!p) {
         free(content);
         return;
     }
-    
+
     while (st->playlist_count < MAX_PLAYLISTS) {
         const char *obj_start = strchr(p, '{');
         if (!obj_start) break;
-        
+
         const char *obj_end = strchr(obj_start, '}');
         if (!obj_end) break;
-        
+
         size_t obj_len = obj_end - obj_start + 1;
         char *obj = malloc(obj_len + 1);
         if (!obj) break;
-        
+
         memcpy(obj, obj_start, obj_len);
         obj[obj_len] = '\0';
-        
+
         char *name = json_get_string(obj, "name");
         char *filename = json_get_string(obj, "filename");
-        
+
         if (name && filename && name[0] && filename[0]) {
             st->playlists[st->playlist_count].name = name;
             st->playlists[st->playlist_count].filename = filename;
@@ -2112,28 +2113,28 @@ static void load_playlists(AppState *st) {
             free(name);
             free(filename);
         }
-        
+
         free(obj);
         p = obj_end + 1;
     }
-    
+
     free(content);
 }
 
 static int create_playlist(AppState *st, const char *name, bool is_youtube) {
     if (st->playlist_count >= MAX_PLAYLISTS) return -1;
     if (!name || !name[0]) return -1;
-    
+
     // Check for duplicate name
     for (int i = 0; i < st->playlist_count; i++) {
         if (strcasecmp(st->playlists[i].name, name) == 0) {
             return -2; // Already exists
         }
     }
-    
+
     char *filename = sanitize_filename(name);
     if (!filename) return -1;
-    
+
     // Check for duplicate filename
     for (int i = 0; i < st->playlist_count; i++) {
         if (strcmp(st->playlists[i].filename, filename) == 0) {
@@ -2143,14 +2144,14 @@ static int create_playlist(AppState *st, const char *name, bool is_youtube) {
                 free(filename);
                 return -1;
             }
-            snprintf(new_filename, strlen(filename) + 10, "%d_%s", 
+            snprintf(new_filename, strlen(filename) + 10, "%d_%s",
                      st->playlist_count, filename);
             free(filename);
             filename = new_filename;
             break;
         }
     }
-    
+
     int idx = st->playlist_count;
     st->playlists[idx].name = strdup(name);
     st->playlists[idx].filename = filename;
@@ -2158,10 +2159,10 @@ static int create_playlist(AppState *st, const char *name, bool is_youtube) {
     st->playlists[idx].is_youtube_playlist = is_youtube;
     st->playlists[idx].youtube_playlist_url = NULL;
     st->playlist_count++;
-    
+
     save_playlists_index(st);
     save_playlist(st, idx);
-    
+
     return idx;
 }
 
@@ -2227,23 +2228,23 @@ static bool delete_playlist(AppState *st, int idx) {
 static bool add_song_to_playlist(AppState *st, int playlist_idx, Song *song) {
     if (playlist_idx < 0 || playlist_idx >= st->playlist_count) return false;
     if (!song || !song->video_id) return false;
-    
+
     Playlist *pl = &st->playlists[playlist_idx];
-    
+
     // Load songs if not loaded
     if (pl->count == 0 && file_exists(st->playlists_dir)) {
         load_playlist_songs(st, playlist_idx);
     }
-    
+
     if (pl->count >= MAX_PLAYLIST_ITEMS) return false;
-    
+
     // Check for duplicate
     for (int i = 0; i < pl->count; i++) {
         if (pl->items[i].video_id && strcmp(pl->items[i].video_id, song->video_id) == 0) {
             return false; // Already in playlist
         }
     }
-    
+
     int idx = pl->count;
     pl->items[idx].title = song->title ? strdup(song->title) : strdup("Unknown");
     pl->items[idx].video_id = strdup(song->video_id);
@@ -2268,15 +2269,15 @@ static bool add_song_to_playlist(AppState *st, int playlist_idx, Song *song) {
 
 static bool remove_song_from_playlist(AppState *st, int playlist_idx, int song_idx) {
     if (playlist_idx < 0 || playlist_idx >= st->playlist_count) return false;
-    
+
     Playlist *pl = &st->playlists[playlist_idx];
     if (song_idx < 0 || song_idx >= pl->count) return false;
-    
+
     // Free song data
     free(pl->items[song_idx].title);
     free(pl->items[song_idx].video_id);
     free(pl->items[song_idx].url);
-    
+
     // Shift remaining songs
     for (int i = song_idx; i < pl->count - 1; i++) {
         pl->items[i] = pl->items[i + 1];
@@ -2722,11 +2723,11 @@ static int run_search(AppState *st, const char *raw_query) {
             st->yt_blocked = true;
             continue;
         }
-        
+
         if (!line[0]) continue;
         if (strncmp(line, "ERROR", 5) == 0) continue;
         if (strncmp(line, "WARNING", 7) == 0) continue;
-        
+
         char *sep1 = strstr(line, "|||");
         if (!sep1) continue;
         *sep1 = '\0';
@@ -2751,8 +2752,8 @@ static int run_search(AppState *st, const char *raw_query) {
                  "https://www.youtube.com/watch?v=%s", video_id);
         st->search_results[count].url = strdup(fullurl);
         st->search_results[count].duration = atoi(duration_str);
-        
-        if (st->search_results[count].title && 
+
+        if (st->search_results[count].title &&
             st->search_results[count].video_id &&
             st->search_results[count].url) {
             count++;
@@ -2762,7 +2763,7 @@ static int run_search(AppState *st, const char *raw_query) {
             free(st->search_results[count].url);
         }
     }
-    
+
     free(line);
     sb_exec_pclose(fp);
 
@@ -3205,9 +3206,9 @@ static void draw_download_status(AppState *st, int rows, int cols) {
 
 static void draw_now_playing(AppState *st, int rows, int cols) {
     mvhline(rows - 2, 0, ACS_HLINE, cols);
-    
+
     const char *title = NULL;
-    
+
     if (st->playing_from_playlist && st->playing_playlist_idx >= 0 &&
         st->playing_playlist_idx < st->playlist_count) {
         Playlist *pl = &st->playlists[st->playing_playlist_idx];
@@ -3217,11 +3218,11 @@ static void draw_now_playing(AppState *st, int rows, int cols) {
     } else if (st->playing_index >= 0 && st->playing_index < st->search_count) {
         title = st->search_results[st->playing_index].title;
     }
-    
+
     if (title) {
         mvprintw(rows - 1, 0, " Now playing: ");
         attron(A_BOLD);
-        
+
         int max_np = cols - 35;  // Leave room for download status
         char npbuf[512];
         strncpy(npbuf, title, sizeof(npbuf) - 1);
@@ -3234,7 +3235,7 @@ static void draw_now_playing(AppState *st, int rows, int cols) {
         }
         printw("%s", npbuf);
         attroff(A_BOLD);
-        
+
         if (st->paused) {
             printw(" [PAUSED]");
         }
@@ -3249,7 +3250,7 @@ static void draw_now_playing(AppState *st, int rows, int cols) {
             printw(" [REPEAT:%s]", repeat_mode_label(effective_repeat));
         }
     }
-    
+
     // NEW: Draw surikata status indicator
     if (st->surikata_online) {
         const char *indicator = "SYNC->OK";
@@ -3335,7 +3336,7 @@ static void draw_search_view(AppState *st, const char *status, int rows, int col
         }
 
         mvprintw(y, 0, " %c %3d. %s [%s] %s", mark, idx + 1, dl_mark, dur, titlebuf);
-        
+
         if (is_selected) {
             attroff(A_REVERSE);
         }
@@ -3358,31 +3359,31 @@ static void draw_playlists_view(AppState *st, const char *status, int rows, int 
     int list_top = 7;
     int list_height = rows - list_top - 2;
     if (list_height < 1) list_height = 1;
-    
+
     if (st->playlist_count == 0) {
         mvprintw(list_top + 1, 2, "No playlists yet. Press 'c' to create one.");
         return;
     }
-    
+
     // Adjust scroll
     if (st->playlist_selected < st->playlist_scroll) {
         st->playlist_scroll = st->playlist_selected;
     } else if (st->playlist_selected >= st->playlist_scroll + list_height) {
         st->playlist_scroll = st->playlist_selected - list_height + 1;
     }
-    
+
     for (int i = 0; i < list_height && (st->playlist_scroll + i) < st->playlist_count; i++) {
         int idx = st->playlist_scroll + i;
         bool is_selected = (idx == st->playlist_selected);
-        
+
         int y = list_top + i;
         move(y, 0);
         clrtoeol();
-        
+
         if (is_selected) {
             attron(A_REVERSE);
         }
-        
+
         // Load song count if needed
         Playlist *pl = &st->playlists[idx];
         if (pl->count == 0) {
@@ -3409,7 +3410,7 @@ static void draw_playlist_songs_view(AppState *st, const char *status, int rows,
     if (st->current_playlist_idx < 0 || st->current_playlist_idx >= st->playlist_count) {
         return;
     }
-    
+
     Playlist *pl = &st->playlists[st->current_playlist_idx];
 
     mvprintw(4, 0, "Playlist: ");
@@ -3434,30 +3435,30 @@ static void draw_playlist_songs_view(AppState *st, const char *status, int rows,
     int list_top = 7;
     int list_height = rows - list_top - 2;
     if (list_height < 1) list_height = 1;
-    
+
     if (pl->count == 0) {
         mvprintw(list_top + 1, 2, "Playlist is empty. Search for songs and press 'a' to add.");
         return;
     }
-    
+
     // Adjust scroll
     if (st->playlist_song_selected < st->playlist_song_scroll) {
         st->playlist_song_scroll = st->playlist_song_selected;
     } else if (st->playlist_song_selected >= st->playlist_song_scroll + list_height) {
         st->playlist_song_scroll = st->playlist_song_selected - list_height + 1;
     }
-    
+
     for (int i = 0; i < list_height && (st->playlist_song_scroll + i) < pl->count; i++) {
         int idx = st->playlist_song_scroll + i;
         bool is_selected = (idx == st->playlist_song_selected);
-        bool is_playing = (st->playing_from_playlist && 
+        bool is_playing = (st->playing_from_playlist &&
                           st->playing_playlist_idx == st->current_playlist_idx &&
                           st->playing_index == idx);
-        
+
         int y = list_top + i;
         move(y, 0);
         clrtoeol();
-        
+
         char mark = ' ';
         if (is_playing) {
             mark = st->paused ? '|' : '>';
@@ -3466,7 +3467,7 @@ static void draw_playlist_songs_view(AppState *st, const char *status, int rows,
         if (is_selected) {
             attron(A_REVERSE);
         }
-        
+
         char dur[16];
         format_duration(pl->items[idx].duration, dur);
 
@@ -3493,7 +3494,7 @@ static void draw_playlist_songs_view(AppState *st, const char *status, int rows,
         }
 
         mvprintw(y, 0, " %c %3d. %s [%s] %s", mark, idx + 1, dl_mark, dur, titlebuf);
-        
+
         if (is_selected) {
             attroff(A_REVERSE);
         }
@@ -3520,7 +3521,7 @@ static void draw_add_to_playlist_view(AppState *st, const char *status, int rows
         printw("%s", titlebuf);
         attroff(A_BOLD);
     }
-    
+
     if (status && status[0]) {
         mvprintw(5, 0, ">>> %s", status);
     }
@@ -3535,29 +3536,29 @@ static void draw_add_to_playlist_view(AppState *st, const char *status, int rows
         mvprintw(list_top + 1, 2, "No playlists yet. Press 'c' to create one.");
         return;
     }
-    
+
     // Adjust scroll
     if (st->add_to_playlist_selected < st->add_to_playlist_scroll) {
         st->add_to_playlist_scroll = st->add_to_playlist_selected;
     } else if (st->add_to_playlist_selected >= st->add_to_playlist_scroll + list_height) {
         st->add_to_playlist_scroll = st->add_to_playlist_selected - list_height + 1;
     }
-    
+
     for (int i = 0; i < list_height && (st->add_to_playlist_scroll + i) < st->playlist_count; i++) {
         int idx = st->add_to_playlist_scroll + i;
         bool is_selected = (idx == st->add_to_playlist_selected);
-        
+
         int y = list_top + i;
         move(y, 0);
         clrtoeol();
-        
+
         if (is_selected) {
             attron(A_REVERSE);
         }
-        
+
         Playlist *pl = &st->playlists[idx];
         mvprintw(y, 0, "   %3d. %s (%d songs)", idx + 1, pl->name, pl->count);
-        
+
         if (is_selected) {
             attroff(A_REVERSE);
         }
@@ -3733,32 +3734,32 @@ static void draw_exit_dialog(AppState *st, int pending_count) {
     (void)st; // Suppress unused parameter warning
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
-    
+
     int dialog_w = 50;
     int dialog_h = 8;
     int start_x = (cols - dialog_w) / 2;
     int start_y = (rows - dialog_h) / 2;
-    
+
     // Draw box background
     for (int y = start_y; y < start_y + dialog_h; y++) {
         mvhline(y, start_x, ' ', dialog_w);
     }
-    
+
     // Draw title bar
     attron(A_REVERSE);
     mvprintw(start_y, start_x, "%-*s", dialog_w, "");
     mvprintw(start_y, start_x + (dialog_w - 16) / 2, " Download Queue ");
     attroff(A_REVERSE);
-    
+
     // Draw content
     mvprintw(start_y + 2, start_x + 2, "Downloads in progress: %d remaining", pending_count);
     mvprintw(start_y + 4, start_x + 2, "Downloads will resume on next startup.");
-    
+
     // Draw options
     attron(A_BOLD);
     mvprintw(start_y + 6, start_x + 2, "[q] Quit anyway    [Esc] Cancel");
     attroff(A_BOLD);
-    
+
     refresh();
 }
 
@@ -4000,12 +4001,12 @@ static void draw_surisync_view(AppState *st, const char *status, int rows, int c
 
 static void draw_ui(AppState *st, const char *status) {
     erase();
-    
+
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
-    
+
     draw_header(st, cols, st->view);
-    
+
     switch (st->view) {
         case VIEW_SEARCH:
             draw_search_view(st, status, rows, cols);
@@ -4029,9 +4030,9 @@ static void draw_ui(AppState *st, const char *status) {
             draw_surisync_view(st, status, rows, cols);
             break;
     }
-    
+
     draw_now_playing(st, rows, cols);
-    
+
     refresh();
 }
 
@@ -4045,7 +4046,7 @@ static void youtube_fetch_progress_callback(int count, const char *message, void
     if (status_buf && message) {
         strncpy(status_buf, message, 511);
         status_buf[511] = '\0';
-        
+
         // Redraw UI to show progress
         if (g_app_state) {
             draw_ui(g_app_state, status_buf);
@@ -4061,41 +4062,41 @@ static void youtube_fetch_progress_callback(int count, const char *message, void
 static int get_string_input(char *buf, size_t bufsz, const char *prompt) {
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
-    
+
     int y = rows - 1;
     move(y, 0);
     clrtoeol();
-    
+
     attron(A_BOLD);
     mvprintw(y, 0, "%s", prompt);
     attroff(A_BOLD);
     refresh();
-    
+
     int prompt_len = strlen(prompt);
     int max_input = cols - prompt_len - 2;
     if (max_input > (int)bufsz - 1) max_input = bufsz - 1;
     if (max_input < 1) max_input = 1;
-    
+
     // Disable timeout for blocking input
     timeout(-1);
-    
+
     echo();
     curs_set(1);
     move(y, prompt_len);
-    
+
     getnstr(buf, max_input);
-    
+
     noecho();
     curs_set(0);
-    
+
     // Re-enable timeout for poll-based event checking
     timeout(100);
-    
+
     char *trimmed = trim_whitespace(buf);
     if (trimmed != buf) {
         memmove(buf, trimmed, strlen(trimmed) + 1);
     }
-    
+
     return strlen(buf);
 }
 
@@ -4215,7 +4216,7 @@ static void show_help(void) {
 
     mvprintw(y++, 4, "NAVIGATION:");
     mvprintw(y++, 6, "Up/Down/j/k Navigate list");
-    mvprintw(y++, 6, "PgUp/PgDn   Page up/down");
+    mvprintw(y++, 6, "PgUp/PgDn   Page up/down (also Ctrl+U/Ctrl+D)");
     mvprintw(y++, 6, "g/G         Go to start/end");
     mvprintw(y++, 6, "Esc         Go back");
     y++;
@@ -4265,7 +4266,7 @@ static bool check_dependencies(AppState *st, char *errmsg, size_t errsz) {
         snprintf(errmsg, errsz, "yt-dlp not found! Will be downloaded automatically on next start.");
         return false;
     }
-    
+
     FILE *mpv_fp = popen("which mpv 2>/dev/null", "r");
     if (mpv_fp) {
         char buf[256];
@@ -5016,10 +5017,10 @@ int main(int argc, char *argv[]) {
     sb_log("Config dir: %s", st.config_dir);
     sb_log("yt-dlp bin dir: %s (exists=%s)", st.ytdlp_bin_dir, dir_exists(st.ytdlp_bin_dir) ? "yes" : "no");
     sb_log("yt-dlp local path: %s", st.ytdlp_local_path);
-    
+
     // NEW: Load configuration
     load_config(&st);
-    
+
     // Load playlists
     load_playlists(&st);
 
@@ -5090,12 +5091,12 @@ int main(int argc, char *argv[]) {
     noecho();
     keypad(stdscr, TRUE);
     curs_set(0);
-    
+
     // Set timeout for non-blocking input (for poll-based event checking)
     timeout(100); // 100ms timeout
-    
+
     char status[512] = "";
-    
+
     if (!check_dependencies(&st, status, sizeof(status))) {
         draw_ui(&st, status);
         timeout(-1);
@@ -5104,7 +5105,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "%s\n", status);
         return 1;
     }
-    
+
     // Restore session if remember_session is enabled
     if (st.config.remember_session) {
         if (st.was_playing_playlist && st.last_playlist_idx >= 0 &&
@@ -5153,7 +5154,7 @@ int main(int argc, char *argv[]) {
     draw_ui(&st, status);
 
     bool running = true;
-    
+
     while (running) {
         // NEW: Update spinner for download animation
         time_t now = time(NULL);
@@ -5161,7 +5162,7 @@ int main(int argc, char *argv[]) {
             st.spinner_frame++;
             st.last_spinner_update = now;
         }
-        
+
         // Check for track end via mpv IPC
         // Only check if we've been playing for at least 3 seconds
         if (st.playing_index >= 0 && mpv_ipc_fd >= 0) {
@@ -5195,7 +5196,7 @@ int main(int argc, char *argv[]) {
                 }
             }
         }
-        
+
         int ch = getch();
 
         if (ch == ERR) {
@@ -5203,13 +5204,13 @@ int main(int argc, char *argv[]) {
             draw_ui(&st, status);
             continue;
         }
-        
+
         int rows, cols;
         getmaxyx(stdscr, rows, cols);
         (void)cols;
         int list_height = rows - 7;
         if (list_height < 1) list_height = 1;
-        
+
         // NEW: Handle settings editing mode separately
         if (st.view == VIEW_SETTINGS && st.settings_editing) {
             switch (ch) {
@@ -5218,7 +5219,7 @@ int main(int argc, char *argv[]) {
                     curs_set(0);
                     snprintf(status, sizeof(status), "Edit cancelled");
                     break;
-                
+
                 case '\n':
                 case KEY_ENTER: // Save
                     if (st.settings_selected == 8) {
@@ -5241,7 +5242,7 @@ int main(int argc, char *argv[]) {
                         snprintf(status, sizeof(status), "Download path saved");
                     }
                     break;
-                
+
                 case KEY_BACKSPACE:
                 case 127:
                 case 8: // Backspace
@@ -5252,7 +5253,7 @@ int main(int argc, char *argv[]) {
                         st.settings_edit_pos--;
                     }
                     break;
-                
+
                 case KEY_DC: // Delete
                     if (st.settings_edit_pos < (int)strlen(st.settings_edit_buffer)) {
                         memmove(&st.settings_edit_buffer[st.settings_edit_pos],
@@ -5260,24 +5261,24 @@ int main(int argc, char *argv[]) {
                                 strlen(&st.settings_edit_buffer[st.settings_edit_pos + 1]) + 1);
                     }
                     break;
-                
+
                 case KEY_LEFT:
                     if (st.settings_edit_pos > 0) st.settings_edit_pos--;
                     break;
-                
+
                 case KEY_RIGHT:
                     if (st.settings_edit_pos < (int)strlen(st.settings_edit_buffer))
                         st.settings_edit_pos++;
                     break;
-                
+
                 case KEY_HOME:
                     st.settings_edit_pos = 0;
                     break;
-                
+
                 case KEY_END:
                     st.settings_edit_pos = strlen(st.settings_edit_buffer);
                     break;
-                
+
                 default:
                     // Insert printable character
                     if (ch >= 32 && ch < 127) {
@@ -5295,7 +5296,7 @@ int main(int argc, char *argv[]) {
             draw_ui(&st, status);
             continue;
         }
-        
+
         // Global keys
         switch (ch) {
             case 'q': {
@@ -5315,7 +5316,7 @@ int main(int argc, char *argv[]) {
                 }
                 continue;
             }
-            
+
             case ' ':
                 if (st.playing_index >= 0 && file_exists(IPC_SOCKET)) {
                     mpv_toggle_pause();
@@ -5323,21 +5324,21 @@ int main(int argc, char *argv[]) {
                     snprintf(status, sizeof(status), st.paused ? "Paused" : "Playing");
                 }
                 break;
-            
+
             case 'n':
                 if (st.playing_index >= 0) {
                     play_next(&st);
                     snprintf(status, sizeof(status), "Next track");
                 }
                 break;
-            
+
             case 'p':
                 if (st.playing_index >= 0) {
                     play_prev(&st);
                     snprintf(status, sizeof(status), "Previous track");
                 }
                 break;
-            
+
             case 'h':
             case '?':
                 show_help();
@@ -5421,15 +5422,15 @@ int main(int argc, char *argv[]) {
                     status[0] = '\0';
                 }
                 break;
-            
+
             case KEY_RESIZE:
                 clear();
                 break;
-            
+
             default:
                 break;
         }
-        
+
         // View-specific keys
         switch (st.view) {
             case VIEW_SEARCH: {
@@ -5438,36 +5439,38 @@ int main(int argc, char *argv[]) {
                     case 'k':
                         if (st.search_selected > 0) st.search_selected--;
                         break;
-                    
+
                     case KEY_DOWN:
                     case 'j':
                         if (st.search_selected + 1 < st.search_count) st.search_selected++;
                         break;
-                    
+
                     case KEY_PPAGE:
+                    case KEY_CTRL('u'):
                         st.search_selected -= list_height;
                         if (st.search_selected < 0) st.search_selected = 0;
                         break;
-                    
+
                     case KEY_NPAGE:
+                    case KEY_CTRL('d'):
                         st.search_selected += list_height;
-                        if (st.search_selected >= st.search_count) 
+                        if (st.search_selected >= st.search_count)
                             st.search_selected = st.search_count - 1;
                         if (st.search_selected < 0) st.search_selected = 0;
                         break;
-                    
+
                     case KEY_HOME:
                     case 'g':
                         st.search_selected = 0;
                         st.search_scroll = 0;
                         break;
-                    
+
                     case KEY_END:
                         if (st.search_count > 0) {
                             st.search_selected = st.search_count - 1;
                         }
                         break;
-                    
+
                     case '\n':
                     case KEY_ENTER:
                         if (st.search_count > 0) {
@@ -5477,7 +5480,7 @@ int main(int argc, char *argv[]) {
                                      st.search_results[st.search_selected].title : "?");
                         }
                         break;
-                    
+
                     case '/':
                     case 's': {
                         char q[256] = {0};
@@ -5485,7 +5488,7 @@ int main(int argc, char *argv[]) {
                         if (len > 0) {
                             snprintf(status, sizeof(status), "Searching: %s ...", q);
                             draw_ui(&st, status);
-                            
+
                             int r = run_search(&st, q);
                             if (r < 0) {
                                 snprintf(status, sizeof(status), "Search error!");
@@ -5504,7 +5507,7 @@ int main(int argc, char *argv[]) {
                         }
                         break;
                     }
-                    
+
                     case 'x':
                         if (st.playing_index >= 0) {
                             mpv_stop_playback();
@@ -5515,7 +5518,7 @@ int main(int argc, char *argv[]) {
                             snprintf(status, sizeof(status), "Playback stopped");
                         }
                         break;
-                    
+
                     case 'f':
                         st.view = VIEW_PLAYLISTS;
                         st.playlist_selected = 0;
@@ -5523,7 +5526,7 @@ int main(int argc, char *argv[]) {
                         load_playlists(&st);
                         snprintf(status, sizeof(status), "Playlists");
                         break;
-                    
+
                     case 'a':
                         if (st.search_count > 0) {
                             st.song_to_add = &st.search_results[st.search_selected];
@@ -5535,7 +5538,7 @@ int main(int argc, char *argv[]) {
                             snprintf(status, sizeof(status), "No song selected");
                         }
                         break;
-                    
+
                     case 'c': {
                         char name[128] = {0};
                         int len = get_string_input(name, sizeof(name), "New playlist name: ");
@@ -5553,7 +5556,7 @@ int main(int argc, char *argv[]) {
                         }
                         break;
                     }
-                    
+
                     // NEW: Open settings with 'S'
                     case 'S':
                         st.view = VIEW_SETTINGS;
@@ -5561,7 +5564,7 @@ int main(int argc, char *argv[]) {
                         st.settings_editing = false;
                         snprintf(status, sizeof(status), "Settings");
                         break;
-                    
+
                     // NEW: Download single song from search
                     case 'd':
                         if (st.search_count > 0) {
@@ -5586,31 +5589,33 @@ int main(int argc, char *argv[]) {
                 }
                 break;
             }
-            
+
             case VIEW_PLAYLISTS: {
                 switch (ch) {
                     case KEY_UP:
                     case 'k':
                         if (st.playlist_selected > 0) st.playlist_selected--;
                         break;
-                    
+
                     case KEY_DOWN:
                     case 'j':
                         if (st.playlist_selected + 1 < st.playlist_count) st.playlist_selected++;
                         break;
-                    
+
                     case KEY_PPAGE:
+                    case KEY_CTRL('u'):
                         st.playlist_selected -= list_height;
                         if (st.playlist_selected < 0) st.playlist_selected = 0;
                         break;
-                    
+
                     case KEY_NPAGE:
+                    case KEY_CTRL('d'):
                         st.playlist_selected += list_height;
                         if (st.playlist_selected >= st.playlist_count)
                             st.playlist_selected = st.playlist_count - 1;
                         if (st.playlist_selected < 0) st.playlist_selected = 0;
                         break;
-                    
+
                     case '\n':
                     case KEY_ENTER:
                         if (st.playlist_count > 0) {
@@ -5623,7 +5628,7 @@ int main(int argc, char *argv[]) {
                                      st.playlists[st.current_playlist_idx].name);
                         }
                         break;
-                    
+
                     case 'c': {
                         char name[128] = {0};
                         int len = get_string_input(name, sizeof(name), "New playlist name: ");
@@ -5642,7 +5647,7 @@ int main(int argc, char *argv[]) {
                         }
                         break;
                     }
-                    
+
                     case 'x':
                         if (st.playlist_count > 0) {
                             char confirm[8] = {0};
@@ -5830,7 +5835,7 @@ int main(int argc, char *argv[]) {
                         }
                         break;
                     }
-                    
+
                     // NEW: Download entire playlist
                     case 'd':
                         if (st.playlist_count > 0) {
@@ -5845,25 +5850,25 @@ int main(int argc, char *argv[]) {
                             if (pl->count == 0) {
                                 load_playlist_songs(&st, st.playlist_selected);
                             }
-                            
+
                             int added = 0;
                             int skipped = 0;
-                            
+
                             for (int i = 0; i < pl->count; i++) {
-                                int result = add_to_download_queue(&st, 
+                                int result = add_to_download_queue(&st,
                                     pl->items[i].video_id,
                                     pl->items[i].title,
                                     pl->name);
-                                
+
                                 if (result > 0) {
                                     added++;
                                 } else if (result == 0) {
                                     skipped++;
                                 }
                             }
-                            
+
                             if (added > 0) {
-                                snprintf(status, sizeof(status), "Queued %d songs (%d already downloaded)", 
+                                snprintf(status, sizeof(status), "Queued %d songs (%d already downloaded)",
                                          added, skipped);
                             } else if (skipped > 0) {
                                 snprintf(status, sizeof(status), "All %d songs already downloaded", skipped);
@@ -5889,25 +5894,27 @@ int main(int argc, char *argv[]) {
                 if (st.current_playlist_idx >= 0 && st.current_playlist_idx < st.playlist_count) {
                     pl = &st.playlists[st.current_playlist_idx];
                 }
-                
+
                 switch (ch) {
                     case KEY_UP:
                     case 'k':
                         if (st.playlist_song_selected > 0) st.playlist_song_selected--;
                         break;
-                    
+
                     case KEY_DOWN:
                     case 'j':
-                        if (pl && st.playlist_song_selected + 1 < pl->count) 
+                        if (pl && st.playlist_song_selected + 1 < pl->count)
                             st.playlist_song_selected++;
                         break;
-                    
+
                     case KEY_PPAGE:
+                    case KEY_CTRL('u'):
                         st.playlist_song_selected -= list_height;
                         if (st.playlist_song_selected < 0) st.playlist_song_selected = 0;
                         break;
-                    
+
                     case KEY_NPAGE:
+                    case KEY_CTRL('d'):
                         if (pl) {
                             st.playlist_song_selected += list_height;
                             if (st.playlist_song_selected >= pl->count)
@@ -5915,7 +5922,7 @@ int main(int argc, char *argv[]) {
                             if (st.playlist_song_selected < 0) st.playlist_song_selected = 0;
                         }
                         break;
-                    
+
                     case '\n':
                     case KEY_ENTER:
                         if (pl && pl->count > 0) {
@@ -5925,7 +5932,7 @@ int main(int argc, char *argv[]) {
                                      pl->items[st.playlist_song_selected].title : "?");
                         }
                         break;
-                    
+
                     // NEW: Download single song from playlist (saves to playlist folder)
                     case 'd':
                         if (pl && pl->count > 0) {
@@ -5947,7 +5954,7 @@ int main(int argc, char *argv[]) {
                             snprintf(status, sizeof(status), "No song selected");
                         }
                         break;
-                    
+
                     // Add current song to another playlist
                     case 'a':
                         if (pl && pl->count > 0 && st.playlist_song_selected < pl->count) {
@@ -5974,7 +5981,7 @@ int main(int argc, char *argv[]) {
                             }
                         }
                         break;
-                    
+
                     case 'D':
                         if (pl && pl->is_youtube_playlist && pl->count > 0) {
                             if (!st.ffmpeg_available) {
@@ -6132,20 +6139,20 @@ int main(int argc, char *argv[]) {
                 }
                 break;
             }
-            
+
             case VIEW_ADD_TO_PLAYLIST: {
                 switch (ch) {
                     case KEY_UP:
                     case 'k':
                         if (st.add_to_playlist_selected > 0) st.add_to_playlist_selected--;
                         break;
-                    
+
                     case KEY_DOWN:
                     case 'j':
                         if (st.add_to_playlist_selected + 1 < st.playlist_count)
                             st.add_to_playlist_selected++;
                         break;
-                    
+
                     case '\n':
                     case KEY_ENTER:
                         if (st.playlist_count > 0 && st.song_to_add) {
@@ -6177,7 +6184,7 @@ int main(int argc, char *argv[]) {
                             st.view = VIEW_SEARCH;
                         }
                         break;
-                    
+
                     case 'c': {
                         char name[128] = {0};
                         int len = get_string_input(name, sizeof(name), "New playlist name: ");
@@ -6205,7 +6212,7 @@ int main(int argc, char *argv[]) {
                 }
                 break;
             }
-            
+
             // NEW: Settings view key handling
             case VIEW_SETTINGS: {
                 switch (ch) {

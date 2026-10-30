@@ -360,7 +360,7 @@ All shortcuts are visible in the header when you run shellbeats. Here's the comp
 | Key | Action |
 |-----|--------|
 | `↑/↓` or `j/k` | Move selection |
-| `PgUp/PgDn` | Page up/down |
+| `PgUp/PgDn` or `Ctrl+U/Ctrl+D` | Page up/down |
 | `g/G` | Jump to start/end |
 | `Esc` | Go back |
 
