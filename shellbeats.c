@@ -4463,59 +4463,137 @@ static bool confirm_quit(AppState *st) {
     return confirm == 'q';
 }
 
-// Handle a key in the search results
-static void handle_search_key(AppState *st, int ch) {
+// Handle movement keys shared by every list view. Returns true if ch was one.
+static bool handle_list_nav_key(int ch, int *selected, int *scroll, int count) {
     int page_size = list_page_size(getmaxy(stdscr));
 
     switch (ch) {
         case KEY_UP:
         case 'k':
-            if (st->search_selected > 0) st->search_selected--;
-            break;
+            move_selection(selected, count, -1);
+            return true;
 
         case KEY_DOWN:
         case 'j':
-            if (st->search_selected + 1 < st->search_count) st->search_selected++;
-            break;
+            move_selection(selected, count, 1);
+            return true;
 
         case KEY_PPAGE:
-            move_selection(&st->search_selected, st->search_count, -page_size);
-            break;
+            move_selection(selected, count, -page_size);
+            return true;
 
         case KEY_NPAGE:
-            move_selection(&st->search_selected, st->search_count, page_size);
-            break;
+            move_selection(selected, count, page_size);
+            return true;
 
         case KEY_CTRL('u'):
-            move_selection(&st->search_selected, st->search_count, -half_page(page_size));
-            break;
+            move_selection(selected, count, -half_page(page_size));
+            return true;
 
         case KEY_CTRL('d'):
-            move_selection(&st->search_selected, st->search_count, half_page(page_size));
-            break;
+            move_selection(selected, count, half_page(page_size));
+            return true;
 
         case KEY_HOME:
         case 'g':
-            st->search_selected = 0;
-            st->search_scroll = 0;
-            break;
+            *selected = 0;
+            *scroll = 0;
+            return true;
 
         case KEY_END:
-            if (st->search_count > 0) {
-                st->search_selected = st->search_count - 1;
-            }
-            break;
+        case 'G':
+            move_selection(selected, count, count);
+            return true;
+    }
+    return false;
+}
 
+// A list of songs shown in a view: search results or a playlist's songs
+typedef struct {
+    Song *songs;
+    int count;
+    int *selected;
+    int *scroll;
+    int playlist_idx;  // Playlist the songs belong to, -1 for search results
+} SongList;
+
+// Handle keys shared by every song list: movement, play, download, add to
+// playlist and stop. Returns true if ch was one of them.
+static bool handle_song_list_key(AppState *st, int ch, SongList *list) {
+    if (handle_list_nav_key(ch, list->selected, list->scroll, list->count)) return true;
+
+    bool has_song = list->count > 0 && *list->selected < list->count;
+    Song *song = has_song ? &list->songs[*list->selected] : NULL;
+
+    switch (ch) {
         case '\n':
         case KEY_ENTER:
-            if (st->search_count > 0) {
-                play_search_result(st, st->search_selected);
-                snprintf(st->status, STATUS_LEN, "Playing: %s",
-                         st->search_results[st->search_selected].title ?
-                         st->search_results[st->search_selected].title : "?");
+            if (song) {
+                if (list->playlist_idx >= 0)
+                    play_playlist_song(st, list->playlist_idx, *list->selected);
+                else
+                    play_search_result(st, *list->selected);
+                snprintf(st->status, STATUS_LEN, "Playing: %s", song->title ? song->title : "?");
             }
-            break;
+            return true;
 
+        // Download the selected song (into the playlist's folder, if any)
+        case 'd':
+            if (!song) {
+                snprintf(st->status, STATUS_LEN, "No song selected");
+            } else if (!st->ffmpeg_available) {
+                snprintf(st->status, STATUS_LEN, "ffmpeg not found - required for downloads");
+            } else {
+                const char *pl_name = list->playlist_idx >= 0
+                    ? st->playlists[list->playlist_idx].name : NULL;
+                int result = add_to_download_queue(st, song->video_id, song->title, pl_name);
+                if (result > 0) {
+                    snprintf(st->status, STATUS_LEN, "Queued: %s", song->title);
+                } else if (result == 0) {
+                    snprintf(st->status, STATUS_LEN, "Already downloaded or queued");
+                } else {
+                    snprintf(st->status, STATUS_LEN, "Failed to queue download");
+                }
+            }
+            return true;
+
+        // Add the selected song to a playlist
+        case 'a':
+            if (song) {
+                st->song_to_add = song;
+                st->add_to_playlist_selected = 0;
+                st->add_to_playlist_scroll = 0;
+                st->view = VIEW_ADD_TO_PLAYLIST;
+                snprintf(st->status, STATUS_LEN, "Select playlist");
+            } else {
+                snprintf(st->status, STATUS_LEN, "No song selected");
+            }
+            return true;
+
+        // Stop playback
+        case 'x':
+            if (st->playing_index >= 0) {
+                mpv_stop_playback();
+                stop_playback_state(st);
+                snprintf(st->status, STATUS_LEN, "Playback stopped");
+            }
+            return true;
+    }
+    return false;
+}
+
+// Handle a key in the search results
+static void handle_search_key(AppState *st, int ch) {
+    SongList list = {
+        .songs = st->search_results,
+        .count = st->search_count,
+        .selected = &st->search_selected,
+        .scroll = &st->search_scroll,
+        .playlist_idx = -1,
+    };
+    if (handle_song_list_key(st, ch, &list)) return;
+
+    switch (ch) {
         case '/':
         case 's': {
             char q[256] = {0};
@@ -4543,35 +4621,12 @@ static void handle_search_key(AppState *st, int ch) {
             break;
         }
 
-        case 'x':
-            if (st->playing_index >= 0) {
-                mpv_stop_playback();
-                st->playing_index = -1;
-                st->playing_from_playlist = false;
-                st->playing_playlist_idx = -1;
-                st->paused = false;
-                snprintf(st->status, STATUS_LEN, "Playback stopped");
-            }
-            break;
-
         case 'f':
             st->view = VIEW_PLAYLISTS;
             st->playlist_selected = 0;
             st->playlist_scroll = 0;
             load_playlists(st);
             snprintf(st->status, STATUS_LEN, "Playlists");
-            break;
-
-        case 'a':
-            if (st->search_count > 0) {
-                st->song_to_add = &st->search_results[st->search_selected];
-                st->add_to_playlist_selected = 0;
-                st->add_to_playlist_scroll = 0;
-                st->view = VIEW_ADD_TO_PLAYLIST;
-                snprintf(st->status, STATUS_LEN, "Select playlist");
-            } else {
-                snprintf(st->status, STATUS_LEN, "No song selected");
-            }
             break;
 
         case 'c': {
@@ -4599,62 +4654,15 @@ static void handle_search_key(AppState *st, int ch) {
             st->settings_editing = false;
             snprintf(st->status, STATUS_LEN, "Settings");
             break;
-
-        // NEW: Download single song from search
-        case 'd':
-            if (st->search_count > 0) {
-                if (!st->ffmpeg_available) {
-                    snprintf(st->status, STATUS_LEN,
-                             "ffmpeg not found - required for downloads");
-                    break;
-                }
-                Song *song = &st->search_results[st->search_selected];
-                int result = add_to_download_queue(st, song->video_id, song->title, NULL);
-                if (result > 0) {
-                    snprintf(st->status, STATUS_LEN, "Queued: %s", song->title);
-                } else if (result == 0) {
-                    snprintf(st->status, STATUS_LEN, "Already downloaded or queued");
-                } else {
-                    snprintf(st->status, STATUS_LEN, "Failed to queue download");
-                }
-            } else {
-                snprintf(st->status, STATUS_LEN, "No song selected");
-            }
-            break;
     }
 }
 
 // Handle a key in the playlists list
 static void handle_playlists_key(AppState *st, int ch) {
-    int page_size = list_page_size(getmaxy(stdscr));
+    if (handle_list_nav_key(ch, &st->playlist_selected, &st->playlist_scroll, st->playlist_count))
+        return;
 
     switch (ch) {
-        case KEY_UP:
-        case 'k':
-            if (st->playlist_selected > 0) st->playlist_selected--;
-            break;
-
-        case KEY_DOWN:
-        case 'j':
-            if (st->playlist_selected + 1 < st->playlist_count) st->playlist_selected++;
-            break;
-
-        case KEY_PPAGE:
-            move_selection(&st->playlist_selected, st->playlist_count, -page_size);
-            break;
-
-        case KEY_NPAGE:
-            move_selection(&st->playlist_selected, st->playlist_count, page_size);
-            break;
-
-        case KEY_CTRL('u'):
-            move_selection(&st->playlist_selected, st->playlist_count, -half_page(page_size));
-            break;
-
-        case KEY_CTRL('d'):
-            move_selection(&st->playlist_selected, st->playlist_count, half_page(page_size));
-            break;
-
         case '\n':
         case KEY_ENTER:
             if (st->playlist_count > 0) {
@@ -4921,82 +4929,21 @@ static void handle_playlists_key(AppState *st, int ch) {
 
 // Handle a key in the songs inside a playlist
 static void handle_playlist_songs_key(AppState *st, int ch) {
-    int page_size = list_page_size(getmaxy(stdscr));
-
     Playlist *pl = NULL;
     if (st->current_playlist_idx >= 0 && st->current_playlist_idx < st->playlist_count) {
         pl = &st->playlists[st->current_playlist_idx];
     }
 
+    SongList list = {
+        .songs = pl ? pl->items : NULL,
+        .count = pl ? pl->count : 0,
+        .selected = &st->playlist_song_selected,
+        .scroll = &st->playlist_song_scroll,
+        .playlist_idx = pl ? st->current_playlist_idx : -1,
+    };
+    if (handle_song_list_key(st, ch, &list)) return;
+
     switch (ch) {
-        case KEY_UP:
-        case 'k':
-            if (st->playlist_song_selected > 0) st->playlist_song_selected--;
-            break;
-
-        case KEY_DOWN:
-        case 'j':
-            if (pl && st->playlist_song_selected + 1 < pl->count)
-                st->playlist_song_selected++;
-            break;
-
-        case KEY_PPAGE:
-            move_selection(&st->playlist_song_selected, pl ? pl->count : 0, -page_size);
-            break;
-
-        case KEY_NPAGE:
-            move_selection(&st->playlist_song_selected, pl ? pl->count : 0, page_size);
-            break;
-
-        case KEY_CTRL('u'):
-            move_selection(&st->playlist_song_selected, pl ? pl->count : 0, -half_page(page_size));
-            break;
-
-        case KEY_CTRL('d'):
-            move_selection(&st->playlist_song_selected, pl ? pl->count : 0, half_page(page_size));
-            break;
-
-        case '\n':
-        case KEY_ENTER:
-            if (pl && pl->count > 0) {
-                play_playlist_song(st, st->current_playlist_idx, st->playlist_song_selected);
-                snprintf(st->status, STATUS_LEN, "Playing: %s",
-                         pl->items[st->playlist_song_selected].title ?
-                         pl->items[st->playlist_song_selected].title : "?");
-            }
-            break;
-
-        // NEW: Download single song from playlist (saves to playlist folder)
-        case 'd':
-            if (pl && pl->count > 0) {
-                if (!st->ffmpeg_available) {
-                    snprintf(st->status, STATUS_LEN,
-                             "ffmpeg not found - required for downloads");
-                    break;
-                }
-                Song *song = &pl->items[st->playlist_song_selected];
-                int result = add_to_download_queue(st, song->video_id, song->title, pl->name);
-                if (result > 0) {
-                    snprintf(st->status, STATUS_LEN, "Queued: %s", song->title);
-                } else if (result == 0) {
-                    snprintf(st->status, STATUS_LEN, "Already downloaded or queued");
-                } else {
-                    snprintf(st->status, STATUS_LEN, "Failed to queue download");
-                }
-            } else {
-                snprintf(st->status, STATUS_LEN, "No song selected");
-            }
-            break;
-
-        // Add current song to another playlist
-        case 'a':
-            if (pl && pl->count > 0 && st->playlist_song_selected < pl->count) {
-                st->song_to_add = &pl->items[st->playlist_song_selected];
-                st->add_to_playlist_selected = 0;
-                st->view = VIEW_ADD_TO_PLAYLIST;
-            }
-            break;
-
         // Remove song with 'X'
         case 'X':
             if (pl && pl->count > 0) {
@@ -5132,17 +5079,6 @@ static void handle_playlist_songs_key(AppState *st, int ch) {
             }
             break;
 
-        case 'x':
-            if (st->playing_index >= 0) {
-                mpv_stop_playback();
-                st->playing_index = -1;
-                st->playing_from_playlist = false;
-                st->playing_playlist_idx = -1;
-                st->paused = false;
-                snprintf(st->status, STATUS_LEN, "Playback stopped");
-            }
-            break;
-
         // Rename song title
         case 'r':
             if (pl && pl->count > 0 && st->playlist_song_selected < pl->count) {
@@ -5165,36 +5101,11 @@ static void handle_playlist_songs_key(AppState *st, int ch) {
 
 // Handle a key in the add-to-playlist picker
 static void handle_add_to_playlist_key(AppState *st, int ch) {
-    int page_size = list_page_size(getmaxy(stdscr));
+    if (handle_list_nav_key(ch, &st->add_to_playlist_selected, &st->add_to_playlist_scroll,
+                            st->playlist_count))
+        return;
 
     switch (ch) {
-        case KEY_UP:
-        case 'k':
-            if (st->add_to_playlist_selected > 0) st->add_to_playlist_selected--;
-            break;
-
-        case KEY_DOWN:
-        case 'j':
-            if (st->add_to_playlist_selected + 1 < st->playlist_count)
-                st->add_to_playlist_selected++;
-            break;
-
-        case KEY_PPAGE:
-            move_selection(&st->add_to_playlist_selected, st->playlist_count, -page_size);
-            break;
-
-        case KEY_NPAGE:
-            move_selection(&st->add_to_playlist_selected, st->playlist_count, page_size);
-            break;
-
-        case KEY_CTRL('u'):
-            move_selection(&st->add_to_playlist_selected, st->playlist_count, -half_page(page_size));
-            break;
-
-        case KEY_CTRL('d'):
-            move_selection(&st->add_to_playlist_selected, st->playlist_count, half_page(page_size));
-            break;
-
         case '\n':
         case KEY_ENTER:
             if (st->playlist_count > 0 && st->song_to_add) {
